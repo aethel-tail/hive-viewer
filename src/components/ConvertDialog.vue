@@ -234,7 +234,7 @@ async function doConvert() {
     @click.self="emit('close')"
   >
     <div class="convert-dialog" @keydown.esc.stop="emit('close')">
-      <header class="cd-header">
+      <header v-if="!props.standalone" class="cd-header">
         <span class="cd-title">{{ t("convert.title") }}</span>
         <button
           type="button"

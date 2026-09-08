@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicehash/tauri/dev/crates/tauri-config-schema/schema.json",
   "productName": "Hive Viewer",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "identifier": "dev.hive.viewer",
   "build": {
     "frontendDist": "../dist",
@@ -40,9 +40,7 @@
       "icons/Square150x150Logo.png": "Square150x150Logo.png",
       "icons/Square44x44Logo.png": "Square44x44Logo.png"
     },
-    "icon": [
-      "icons/icon.png"
-    ],
+    "icon": ["icons/icon.png"],
     "fileAssociations": [
       {
         "ext": ["jpg", "jpeg"],

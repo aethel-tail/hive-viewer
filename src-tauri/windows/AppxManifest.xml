@@ -15,7 +15,7 @@
   IgnorableNamespaces="uap uap10 rescap com desktop4 desktop5">
 
   <!-- Publisher must exactly match the signing certificate subject. -->
-  <Identity Name="HiveViewer" Publisher="CN=HiveViewer" Version="1.0.0.0" ProcessorArchitecture="neutral" />
+  <Identity Name="HiveViewer" Publisher="CN=HiveViewer" Version="1.0.1.0" ProcessorArchitecture="neutral" />
 
   <Properties>
     <DisplayName>Hive Viewer</DisplayName>
