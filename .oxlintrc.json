@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["unicorn", "typescript", "oxc", "vue"],
+  "env": {
+    "browser": true,
+    "commonjs": true,
+    "node": true,
+    "shared-node-browser": true
+  },
+  "ignorePatterns": ["dist", ".output", "public", "**/*.d.ts"],
+  "rules": {
+    "@typescript-eslint/no-explicit-any": "error",
+    "curly": "error",
+    "no-var": "error",
+    "prefer-rest-params": "error",
+    "prefer-spread": "error"
+  }
+}

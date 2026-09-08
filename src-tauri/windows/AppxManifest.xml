@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Sparse identity package for Hive Viewer: grants package identity so the
+     Windows 11 context menu verb (IExplorerCommand) can be registered.
+     Packed + signed into HiveViewer.Identity.msix by scripts/build-release.ps1;
+     registered at install time with -ExternalLocation pointing at $INSTDIR,
+     so all relative paths below resolve to files installed next to the exe. -->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+  xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
+  IgnorableNamespaces="uap uap10 rescap com desktop4 desktop5">
+
+  <!-- Publisher must exactly match the signing certificate subject. -->
+  <Identity Name="HiveViewer" Publisher="CN=HiveViewer" Version="1.0.0.0" ProcessorArchitecture="neutral" />
+
+  <Properties>
+    <DisplayName>Hive Viewer</DisplayName>
+    <PublisherDisplayName>Hive Viewer</PublisherDisplayName>
+    <Logo>StoreLogo.png</Logo>
+    <uap10:AllowExternalContent>true</uap10:AllowExternalContent>
+  </Properties>
+
+  <Resources>
+    <Resource Language="zh-CN" />
+  </Resources>
+
+  <Dependencies>
+    <!-- The new context menu exists on Windows 11 only. -->
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.22000.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="unvirtualizedResources" />
+  </Capabilities>
+
+  <Applications>
+    <Application Id="HiveViewer" Executable="hive-viewer.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        AppListEntry="none"
+        DisplayName="Hive Viewer"
+        Description="Hive Viewer"
+        BackgroundColor="transparent"
+        Square150x150Logo="Square150x150Logo.png"
+        Square44x44Logo="Square44x44Logo.png" />
+      <Extensions>
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:SurrogateServer DisplayName="Hive Viewer context menu handler">
+              <!-- CLSID must match CLSID_OPEN_COMMAND in shell-ext/src/lib.rs. -->
+              <com:Class Id="564DF141-C207-46B0-9E42-638B78B4C1CA" Path="hive_shell_ext.dll" ThreadingModel="STA" />
+            </com:SurrogateServer>
+          </com:ComServer>
+        </com:Extension>
+        <desktop4:Extension Category="windows.fileExplorerContextMenus">
+          <desktop4:FileExplorerContextMenus>
+            <desktop5:ItemType Type=".jpg">
+              <desktop5:Verb Id="HiveViewerOpen" Clsid="564DF141-C207-46B0-9E42-638B78B4C1CA" />
+            </desktop5:ItemType>
+            <desktop5:ItemType Type=".jpeg">
+              <desktop5:Verb Id="HiveViewerOpen" Clsid="564DF141-C207-46B0-9E42-638B78B4C1CA" />
+            </desktop5:ItemType>
+            <desktop5:ItemType Type=".png">
+              <desktop5:Verb Id="HiveViewerOpen" Clsid="564DF141-C207-46B0-9E42-638B78B4C1CA" />
+            </desktop5:ItemType>
+            <desktop5:ItemType Type=".gif">
+              <desktop5:Verb Id="HiveViewerOpen" Clsid="564DF141-C207-46B0-9E42-638B78B4C1CA" />
+            </desktop5:ItemType>
+            <desktop5:ItemType Type=".webp">
+              <desktop5:Verb Id="HiveViewerOpen" Clsid="564DF141-C207-46B0-9E42-638B78B4C1CA" />
+            </desktop5:ItemType>
+            <desktop5:ItemType Type=".bmp">
+              <desktop5:Verb Id="HiveViewerOpen" Clsid="564DF141-C207-46B0-9E42-638B78B4C1CA" />
+            </desktop5:ItemType>
+            <desktop5:ItemType Type=".avif">
+              <desktop5:Verb Id="HiveViewerOpen" Clsid="564DF141-C207-46B0-9E42-638B78B4C1CA" />
+            </desktop5:ItemType>
+          </desktop4:FileExplorerContextMenus>
+        </desktop4:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+</Package>

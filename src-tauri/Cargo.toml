@@ -1,0 +1,57 @@
+[package]
+name = "hive-viewer"
+version = "1.0.0"
+description = "Minimal image browser"
+edition = "2021"
+license = "MIT"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+# 官方模板标配：tauri CLI 构建（pnpm tauri build）时自动启用，
+# 使 generate_context 嵌入 frontendDist 而非加载 devUrl；
+# 手动 cargo build 生产构建必须带 --features custom-protocol
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-store = "2"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+image = { version = "0.25", features = ["avif"] }
+# image crate 的 WebP 编码只有无损；有损 WebP 走 libwebp（C 构建，需 MSVC）
+webp = "0.3"
+kamadak-exif = "0.5"
+trash = "5.2.8"
+serde_json = "1.0.151"
+
+# 官方推荐：更小的二进制 + 更快的启动/扫描（Windows Defender 对体积敏感）
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
+
+# 全局 opt-level=s 控体积；图像编解码是 CPU 热点，这些 crate 单独提到 3
+# （二进制约增加几百 KB，解码/缩放/AVIF 编码实测更快）
+[profile.release.package.rav1e]
+opt-level = 3
+
+[profile.release.package.ravif]
+opt-level = 3
+
+[profile.release.package.image]
+opt-level = 3
+
+[profile.release.package.zune-jpeg]
+opt-level = 3
+
+[profile.release.package.png]
+opt-level = 3
+
+[profile.release.package.libwebp-sys]
+opt-level = 3

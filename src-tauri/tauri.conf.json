@@ -1,0 +1,99 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicehash/tauri/dev/crates/tauri-config-schema/schema.json",
+  "productName": "Hive Viewer",
+  "version": "1.0.0",
+  "identifier": "dev.hive.viewer",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://127.0.0.1:5174",
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Hive Viewer",
+        "width": 1200,
+        "height": 900,
+        "create": false
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "licenseFile": "../LICENSE",
+    "resources": {
+      "../shell-ext/target/release/hive_shell_ext.dll": "hive_shell_ext.dll",
+      "windows/HiveViewer.Identity.msix": "HiveViewer.Identity.msix",
+      "windows/hive-viewer.cer": "hive-viewer.cer",
+      "windows/sparse-package.ps1": "sparse-package.ps1",
+      "icons/StoreLogo.png": "StoreLogo.png",
+      "icons/Square150x150Logo.png": "Square150x150Logo.png",
+      "icons/Square44x44Logo.png": "Square44x44Logo.png"
+    },
+    "icon": [
+      "icons/icon.png"
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["jpg", "jpeg"],
+        "name": "JPEG Image",
+        "description": "JPEG image file",
+        "role": "Viewer",
+        "mimeType": "image/jpeg"
+      },
+      {
+        "ext": ["png"],
+        "name": "PNG Image",
+        "description": "PNG image file",
+        "role": "Viewer",
+        "mimeType": "image/png"
+      },
+      {
+        "ext": ["gif"],
+        "name": "GIF Image",
+        "description": "GIF image file",
+        "role": "Viewer",
+        "mimeType": "image/gif"
+      },
+      {
+        "ext": ["webp"],
+        "name": "WebP Image",
+        "description": "WebP image file",
+        "role": "Viewer",
+        "mimeType": "image/webp"
+      },
+      {
+        "ext": ["bmp"],
+        "name": "BMP Image",
+        "description": "BMP image file",
+        "role": "Viewer",
+        "mimeType": "image/bmp"
+      },
+      {
+        "ext": ["avif"],
+        "name": "AVIF Image",
+        "description": "AVIF image file",
+        "role": "Viewer",
+        "mimeType": "image/avif"
+      }
+    ],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "installerHooks": "./windows/hooks.nsi",
+        "template": "./windows/installer.nsi"
+      }
+    }
+  }
+}

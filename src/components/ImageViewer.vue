@@ -1,0 +1,546 @@
+<script setup lang="ts">
+import { ref, reactive, computed, watch, onMounted, onUnmounted } from "vue";
+import { useViewerStore } from "@/stores/viewer";
+import { t } from "@/i18n";
+
+const ZOOM_STEP = 25; // 固定档位步长（%）
+const ZOOM_MIN = 25;
+const ZOOM_MAX = 3200;
+const WHEEL_COOLDOWN_MS = 300;
+
+type Size = { w: number; h: number };
+
+// 双层交叉缓冲：front 在显示，back 在加载；back 全部 img load 完成后才翻转，
+// 翻转前旧图始终完整可见 → 任何加载耗时不黑屏。翻转后清空 back（释放解码内存）。
+interface Layer {
+  uri: string;
+  uri2: string; // 双页第二图；单页/独占时为空
+  group: number[]; // 提交时的 groupIndices 快照（back 层布局独立于 store 当前组）
+  size: Size | null; // img A 的原始尺寸（单页缩放用）
+  need: number; // 需等待的 img 数
+  got: number;
+}
+
+function emptyLayer(): Layer {
+  return { uri: "", uri2: "", group: [], size: null, need: 0, got: 0 };
+}
+
+const store = useViewerStore();
+
+const layers = reactive<[Layer, Layer]>([emptyLayer(), emptyLayer()]);
+const activeIdx = ref(0);
+const effectLayer = ref(-1); // 正在播切换效果的层（新 front），-1 = 无
+
+const containerSize = ref<Size | null>(null);
+const viewerEl = ref<HTMLElement | null>(null);
+const lastWheelTime = ref(0);
+const rotation = ref(0);
+
+const activeLayer = computed(() => layers[activeIdx.value]);
+
+// store 提交新组 → 装入 back 层，等该层 img 全部 load 后翻转
+watch(
+  () => [store.dataUri, store.dataUri2, store.groupIndices] as const,
+  ([uri, uri2, group]) => {
+    if (!uri) {
+      return;
+    }
+    const L = layers[1 - activeIdx.value];
+    L.uri = uri;
+    L.uri2 = uri2;
+    L.group = [...group];
+    // 尺寸在 loadImage/loadGroup 提交前已由 fetchAndMeasure 测量并缓存，
+    // 直接预填 → back 层首次渲染即为适配比例，切换图片无缩放跳变
+    const headPath = group.length ? store.files[group[0]]?.path : undefined;
+    L.size = (headPath ? store.sizeCache[headPath] : undefined) ?? null;
+    L.need = uri2 ? 2 : 1;
+    L.got = 0;
+  },
+);
+
+// store 清空（目录删空等）→ 释放两层，回到占位页
+watch(
+  () => store.dataUri,
+  (uri) => {
+    if (!uri) {
+      for (const L of layers) {
+        Object.assign(L, emptyLayer());
+      }
+      activeIdx.value = 0;
+    }
+  },
+);
+
+function onLayerImgDone(idx: number, which: 0 | 1, e: Event) {
+  const L = layers[idx];
+  const img = e.target as HTMLImageElement;
+  const expect = which === 0 ? L.uri : L.uri2;
+  if (!expect || img.src !== expect) {
+    return;
+  } // 过期事件（快速翻页时被替换的 src）
+  if (e.type === "load" && which === 0) {
+    L.size = { w: img.naturalWidth, h: img.naturalHeight };
+  }
+  L.got++;
+  if (L.got >= L.need && idx !== activeIdx.value) {
+    flipTo(idx);
+  }
+}
+
+function flipTo(idx: number) {
+  activeIdx.value = idx;
+  if (store.slideshowActive && store.slideshowEffect !== "none") {
+    effectLayer.value = idx; // 动画结束后再清 back（见 onEffectEnd）
+  } else {
+    clearBack();
+  }
+}
+
+function clearBack() {
+  const L = layers[1 - activeIdx.value];
+  Object.assign(L, emptyLayer());
+}
+
+function onEffectEnd() {
+  effectLayer.value = -1;
+  clearBack();
+}
+
+const effectClasses = computed(() => ({
+  "effect-fade": store.slideshowEffect === "fade",
+  "effect-flip": store.slideshowEffect === "flip",
+  "effect-slide": store.slideshowEffect === "slide",
+}));
+
+// 双页（两张竖图）布局：把两图等比缩到同高 H，再整体 fit 进容器。
+// 这里用「静态 width/height」排版而非 transform: scale——因为两图缩放比不同，
+// 用 transform 不改变布局盒会导致 flex 行错位/裁剪。width/height 只在翻页时离散赋值，
+// 不做 transition，不违反 CLAUDE.md「不得动画 width/height」的约束。
+// 每层用自己的 group 快照计算，back 层布局不影响 front 显示。
+function dualLayoutFor(L: Layer) {
+  if (L.group.length !== 2 || !containerSize.value) {
+    return null;
+  }
+  const { w: cw, h: ch } = containerSize.value;
+  if (cw === 0 || ch === 0) {
+    return null;
+  }
+  const f0 = store.files[L.group[0]];
+  const f1 = store.files[L.group[1]];
+  if (!f0 || !f1) {
+    return null;
+  }
+  const s0 = store.sizeCache[f0.path];
+  const s1 = store.sizeCache[f1.path];
+  if (!s0 || !s1 || s0.h === 0 || s1.h === 0) {
+    return null;
+  }
+  const a0 = s0.w / s0.h;
+  const a1 = s1.w / s1.h;
+  const H = Math.min(cw / (a0 + a1), ch);
+  return { H, w0: H * a0, w1: H * a1, h0: s0.h, h1: s1.h };
+}
+
+function dualStyleFor(L: Layer, which: 0 | 1) {
+  const d = dualLayoutFor(L);
+  if (!d) {
+    return {};
+  }
+  return which === 0
+    ? { width: d.w0 + "px", height: d.H + "px" }
+    : { width: d.w1 + "px", height: d.H + "px" };
+}
+
+// 单页缩放（fit/width/custom；双页下的单张组按 fit）
+function layerSingleScale(L: Layer): number {
+  if (!L.size || !containerSize.value) {
+    return 1;
+  }
+  const { w: iw, h: ih } = L.size;
+  const { w: cw, h: ch } = containerSize.value;
+  if (iw === 0 || ih === 0 || cw === 0 || ch === 0) {
+    return 1;
+  }
+  if (store.zoomMode === "width") {
+    return cw / iw;
+  }
+  if (store.zoomMode === "custom") {
+    return store.customZoom / 100;
+  }
+  return Math.min(cw / iw, ch / ih);
+}
+
+// 当前有效缩放（displayZoom 与缩放按钮用）：双页对取整体缩放，单页取自身缩放
+const effectiveScale = computed(() => {
+  const L = activeLayer.value;
+  const d = L.uri2 ? dualLayoutFor(L) : null;
+  if (d) {
+    return d.H / Math.max(d.h0, d.h1);
+  }
+  return layerSingleScale(L);
+});
+
+const displayZoom = computed(() => Math.round(effectiveScale.value * 100));
+
+const emit = defineEmits<{
+  "update:displayZoom": [value: number];
+}>();
+
+watch(displayZoom, (value) => emit("update:displayZoom", value), { immediate: true });
+
+function updateContainerSize() {
+  if (viewerEl.value) {
+    const r = viewerEl.value.getBoundingClientRect();
+    containerSize.value = { w: r.width, h: r.height };
+  }
+}
+
+let resizeObs: ResizeObserver | null = null;
+
+onMounted(() => {
+  updateContainerSize();
+  resizeObs = new ResizeObserver(updateContainerSize);
+  if (viewerEl.value) {
+    resizeObs.observe(viewerEl.value);
+  }
+});
+
+onUnmounted(() => {
+  resizeObs?.disconnect();
+});
+
+function zoomIn() {
+  if (!activeLayer.value.uri) {
+    return;
+  }
+  const cur = Math.round(effectiveScale.value * 100);
+  const next = Math.min(ZOOM_MAX, Math.floor(cur / ZOOM_STEP) * ZOOM_STEP + ZOOM_STEP);
+  if (next === cur) {
+    return;
+  }
+  store.customZoom = next;
+  store.zoomMode = "custom";
+  store.showToast(next + "%");
+}
+
+function zoomOut() {
+  if (!activeLayer.value.uri) {
+    return;
+  }
+  const cur = Math.round(effectiveScale.value * 100);
+  const next = Math.max(ZOOM_MIN, Math.ceil(cur / ZOOM_STEP) * ZOOM_STEP - ZOOM_STEP);
+  if (next >= cur) {
+    return;
+  }
+  store.customZoom = next;
+  store.zoomMode = "custom";
+  store.showToast(next + "%");
+}
+
+function rotateClockwise() {
+  rotation.value += 90;
+}
+
+function rotateCounterClockwise() {
+  rotation.value -= 90;
+}
+
+function onWheel(e: WheelEvent) {
+  // Ctrl + 滚轮：缩放（不受翻页冷却影响）
+  if (e.ctrlKey) {
+    if (e.deltaY === 0) {
+      return;
+    }
+    if (e.deltaY < 0) {
+      zoomIn();
+    } else {
+      zoomOut();
+    }
+    return;
+  }
+  if (store.files.length === 0) {
+    return;
+  }
+  if (e.deltaY === 0) {
+    return;
+  }
+
+  const now = Date.now();
+  if (now - lastWheelTime.value < WHEEL_COOLDOWN_MS) {
+    return;
+  }
+  lastWheelTime.value = now;
+
+  if (e.deltaY < 0) {
+    store.goPrev();
+  } else {
+    store.goNext();
+  }
+}
+
+defineExpose({
+  zoomIn,
+  zoomOut,
+  rotateClockwise,
+  rotateCounterClockwise,
+});
+</script>
+
+<template>
+  <div
+    ref="viewerEl"
+    class="viewer-layer"
+    :style="{ '--rot': rotation + 'deg' }"
+    @wheel.prevent="onWheel"
+  >
+    <!-- 双层交叉缓冲：front 覆盖 back；back 加载完成即翻转为 front -->
+    <div
+      v-for="(L, i) in layers"
+      :key="i"
+      v-show="L.uri"
+      class="stage"
+      :class="[
+        L.uri2 ? 'dual' : 'single',
+        { rtl: store.isRtl, front: i === activeIdx, back: i !== activeIdx },
+        i === effectLayer ? effectClasses : {},
+      ]"
+      @animationend="i === effectLayer && onEffectEnd()"
+    >
+      <!-- 双页：两张竖图并排；RTL 时第一张在右 -->
+      <template v-if="L.uri2">
+        <img
+          class="page page-a"
+          :src="L.uri"
+          :style="dualStyleFor(L, 0)"
+          @load="onLayerImgDone(i, 0, $event)"
+          @error="onLayerImgDone(i, 0, $event)"
+        />
+        <img
+          class="page page-b"
+          :src="L.uri2"
+          :style="dualStyleFor(L, 1)"
+          @load="onLayerImgDone(i, 1, $event)"
+          @error="onLayerImgDone(i, 1, $event)"
+        />
+      </template>
+      <!-- 单页：含 fit/width/custom，以及双页下的封面/横图独占/尾页 -->
+      <img
+        v-else
+        :src="L.uri"
+        :style="{ transform: `scale(${layerSingleScale(L)})` }"
+        :class="{ 'no-anim': i !== activeIdx }"
+        @load="onLayerImgDone(i, 0, $event)"
+        @error="onLayerImgDone(i, 0, $event)"
+      />
+    </div>
+    <div v-if="!store.dataUri" class="placeholder">
+      <div class="placeholder-actions">
+        <button class="placeholder-btn" @click="store.openFile">
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <circle cx="8.5" cy="8.5" r="1.5" />
+            <path d="m21 15-5-5L5 21" />
+          </svg>
+          {{ t("app.openImage") }}
+        </button>
+        <button class="placeholder-btn secondary" @click="store.openFolder">
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+          </svg>
+          {{ t("app.openFolder") }}
+        </button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.viewer-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  background: var(--bg);
+  perspective: 1200px;
+}
+
+.viewer-layer img {
+  max-width: none;
+  max-height: none;
+  user-select: none;
+  transform-origin: center center;
+  transition: transform 300ms ease-out;
+  -webkit-user-drag: none;
+}
+
+/* will-change 只留在 .stage（它已是常驻合成层，且保证 back 层翻转前已光栅化）；
+   img 再单独提升一层是冗余的，缩放过渡开始时浏览器会自动提升 */
+
+/* back 层：新图先以 scale(1) 渲染，load 后才知道适配比例，
+   若保留过渡会看到“缩放动画”→ 未显示的层禁用过渡，翻转时已是最终比例 */
+
+.viewer-layer img.no-anim {
+  transition: none;
+}
+
+.stage {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transform: rotate(var(--rot, 0deg));
+  transform-origin: center center;
+  transition: transform 300ms ease-out;
+  will-change: transform;
+}
+
+/* front 覆盖 back：back 始终完整渲染但被遮住，翻转瞬间无重解码 */
+
+.stage.front {
+  z-index: 2;
+}
+
+.stage.back {
+  z-index: 1;
+}
+
+.stage.dual {
+  flex-direction: row;
+  gap: 0;
+}
+
+.stage.dual.rtl {
+  flex-direction: row-reverse;
+}
+
+.stage.dual .page {
+  display: block;
+  flex: 0 0 auto;
+  /* width/height 由内联样式按 dualLayoutFor 静态赋值（非动画） */
+}
+
+/* 幻灯片切换效果：仅 transform / opacity，GPU 友好；
+   作用于新 front 层，旧图垫在底下 → fade 即真正的交叉淡入淡出 */
+
+.effect-fade {
+  animation: fx-fade 300ms ease-out;
+}
+
+.effect-flip {
+  backface-visibility: hidden;
+  animation: fx-flip 400ms ease-out;
+}
+
+.effect-slide {
+  animation: fx-slide 300ms ease-out;
+}
+
+@keyframes fx-fade {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes fx-flip {
+  from {
+    transform: rotate(var(--rot, 0deg)) rotateY(90deg);
+  }
+
+  to {
+    transform: rotate(var(--rot, 0deg)) rotateY(0deg);
+  }
+}
+
+@keyframes fx-slide {
+  from {
+    opacity: 0;
+    transform: rotate(var(--rot, 0deg)) translateX(30px);
+  }
+
+  to {
+    opacity: 1;
+    transform: rotate(var(--rot, 0deg)) translateX(0);
+  }
+}
+
+.placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.placeholder-btn {
+  display: inline-flex;
+  gap: 10px;
+  align-items: center;
+  padding: 14px 32px;
+  font-family: var(--font);
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--fg);
+  cursor: pointer;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  isolation: isolate;
+  backdrop-filter: blur(12px);
+}
+
+/* hover 底色用覆盖层 opacity 过渡（只走合成器），不动 background */
+
+.placeholder-btn::before {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  content: "";
+  background: var(--muted);
+  opacity: 0;
+  transition: opacity 150ms;
+}
+
+.placeholder-btn:hover::before {
+  opacity: 1;
+}
+
+.placeholder-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.placeholder-btn.secondary {
+  color: var(--fg-muted);
+  background: transparent;
+}
+
+.placeholder-btn.secondary:hover {
+  color: var(--fg);
+}
+
+.placeholder-btn svg {
+  width: 20px;
+  height: 20px;
+  color: var(--accent);
+}
+</style>

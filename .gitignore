@@ -1,0 +1,9 @@
+node_modules
+CLAUDE.md
+AGENTS.md
+dist
+docs
+.venv
+/shell-ext/target/
+/src-tauri/windows/HiveViewer.Identity.msix
+/src-tauri/windows/hive-viewer.cer

@@ -1,0 +1,15 @@
+{
+  "identifier": "default",
+  "description": "Default capabilities",
+  "windows": ["main", "convert"],
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "core:window:allow-set-title",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-is-fullscreen",
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-close",
+    "store:default"
+  ]
+}

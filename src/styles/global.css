@@ -1,0 +1,205 @@
+/* ====== Reset ====== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+}
+
+/* ====== Tokens（浅色，默认） ====== */
+
+:root,
+[data-theme="light"] {
+  --bg: #fffbf0;
+  --surface: rgba(255, 251, 240, 0.92);
+  --surface-solid: #fffdf8;
+  --surface-soft: rgba(255, 251, 240, 0.55);
+  --surface-strong: rgba(255, 251, 240, 0.75);
+  --border: #d4c5b2;
+  --border-alpha: rgba(180, 160, 140, 0.45);
+  --border-soft: rgba(200, 170, 130, 0.35);
+  --muted: #f0ebe3;
+  --fg: #4a3025;
+  --fg-muted: #8b7355;
+  --accent: #c77826;
+  --accent-hover: #a8611f;
+  --accent-soft: rgba(199, 120, 38, 0.08);
+  --danger: #c03a2b;
+  --danger-soft: rgba(192, 58, 43, 0.1);
+  --panel-a: rgba(255, 250, 235, 0.88);
+  --panel-b: rgba(250, 240, 220, 0.8);
+  --highlight: rgba(255, 255, 250, 0.3);
+  --glow: rgba(255, 250, 240, 0.5);
+  --shadow-sm: 0 2px 8px rgba(60, 30, 10, 0.08);
+  --shadow-md: 0 8px 28px rgba(60, 30, 10, 0.13);
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  /* 默认字体链：思源系列优先 → 苹果系列 → 微软雅黑兜底 */
+  --font-default:
+    "Source Han Sans SC", "Source Han Sans CN", "Noto Sans CJK SC", "Noto Sans SC", "PingFang SC",
+    "PingFang TC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  --font: var(--font-default);
+}
+
+/* ====== 黑色主题 / 跟随系统（系统深色时）/ 暮夜（深色基调） ====== */
+
+[data-theme="dark"],
+[data-theme="system"],
+[data-theme="night"] {
+  --bg: #141416;
+  --surface: rgba(30, 30, 34, 0.92);
+  --surface-solid: #26262b;
+  --surface-soft: rgba(48, 48, 54, 0.55);
+  --surface-strong: rgba(60, 60, 66, 0.75);
+  --border: #4a4a52;
+  --border-alpha: rgba(130, 130, 140, 0.4);
+  --border-soft: rgba(130, 120, 110, 0.3);
+  --muted: #2e2e33;
+  --fg: #e6e4de;
+  --fg-muted: #96928a;
+  --accent: #e09a4b;
+  --accent-hover: #c78239;
+  --accent-soft: rgba(224, 154, 75, 0.15);
+  --danger: #e5534b;
+  --danger-soft: rgba(229, 83, 75, 0.15);
+  --panel-a: rgba(32, 31, 35, 0.88);
+  --panel-b: rgba(24, 23, 27, 0.8);
+  --highlight: rgba(255, 255, 255, 0.06);
+  --glow: rgba(0, 0, 0, 0.45);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 8px 28px rgba(0, 0, 0, 0.55);
+}
+
+/* 跟随系统：系统浅色时用浅色 token */
+@media (prefers-color-scheme: light) {
+  [data-theme="system"] {
+    --bg: #fffbf0;
+    --surface: rgba(255, 251, 240, 0.92);
+    --surface-solid: #fffdf8;
+    --surface-soft: rgba(255, 251, 240, 0.55);
+    --surface-strong: rgba(255, 251, 240, 0.75);
+    --border: #d4c5b2;
+    --border-alpha: rgba(180, 160, 140, 0.45);
+    --border-soft: rgba(200, 170, 130, 0.35);
+    --muted: #f0ebe3;
+    --fg: #4a3025;
+    --fg-muted: #8b7355;
+    --accent: #c77826;
+    --accent-hover: #a8611f;
+    --accent-soft: rgba(199, 120, 38, 0.08);
+    --panel-a: rgba(255, 250, 235, 0.88);
+    --panel-b: rgba(250, 240, 220, 0.8);
+    --highlight: rgba(255, 255, 250, 0.3);
+    --glow: rgba(255, 250, 240, 0.5);
+    --shadow-sm: 0 2px 8px rgba(60, 30, 10, 0.08);
+    --shadow-md: 0 8px 28px rgba(60, 30, 10, 0.13);
+  }
+}
+
+/* ====== 配色方案（浅色基调，覆盖背景与强调色） ====== */
+
+[data-theme="warm"] {
+  --bg: #fff6e2;
+  --accent: #c77826;
+  --accent-hover: #a8611f;
+  --accent-soft: rgba(199, 120, 38, 0.1);
+}
+
+[data-theme="forest"] {
+  --bg: #f2f8f0;
+  --accent: #3e7c4f;
+  --accent-hover: #346a44;
+  --accent-soft: rgba(62, 124, 79, 0.12);
+}
+
+[data-theme="ocean"] {
+  --bg: #eff7fb;
+  --accent: #2e7da6;
+  --accent-hover: #26698c;
+  --accent-soft: rgba(46, 125, 166, 0.12);
+}
+
+[data-theme="sakura"] {
+  --bg: #fdf3f6;
+  --accent: #d96a8b;
+  --accent-hover: #c45777;
+  --accent-soft: rgba(217, 106, 139, 0.12);
+}
+
+[data-theme="graphite"] {
+  --bg: #f4f4f5;
+  --accent: #6b7280;
+  --accent-hover: #565e6b;
+  --accent-soft: rgba(107, 114, 128, 0.12);
+}
+
+/* 暮夜：深色基调，覆盖背景与强调色 */
+
+[data-theme="night"] {
+  --bg: #1e2430;
+  --accent: #7c9cf0;
+  --accent-hover: #6a86d8;
+  --accent-soft: rgba(124, 156, 240, 0.16);
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+  font-family: var(--font);
+  color: var(--fg);
+  background: var(--bg);
+}
+
+#app {
+  height: 100%;
+}
+
+/* 主题切换过渡（View Transition） */
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 300ms;
+}
+
+/* ====== 全局水波纹（Material 风格） ======
+   按下时从点击点扩散：仅 transform/opacity，走合成器（GPU）。
+   所有 <button> 都需要 relative + hidden 作为涟漪的定位与裁剪容器。 */
+
+button {
+  position: relative;
+  overflow: hidden;
+}
+
+.ripple {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--ripple-size);
+  height: var(--ripple-size);
+  margin-top: calc(var(--ripple-size) / -2);
+  margin-left: calc(var(--ripple-size) / -2);
+  pointer-events: none;
+  background: currentColor;
+  border-radius: 50%;
+  opacity: 0.28;
+  transform: translate(var(--ripple-x), var(--ripple-y)) scale(0);
+  animation: ripple-expand 450ms cubic-bezier(0.2, 0, 0.2, 1) forwards;
+  will-change: transform, opacity;
+}
+
+@keyframes ripple-expand {
+  to {
+    opacity: 0;
+    transform: translate(var(--ripple-x), var(--ripple-y)) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ripple {
+    display: none;
+  }
+}

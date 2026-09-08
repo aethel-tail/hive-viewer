@@ -1,0 +1,12 @@
+{
+  "ignorePatterns": [
+    "dist/**",
+    ".local",
+    ".output.js",
+    "**/*.svg",
+    "**/*.sh",
+    "public/**",
+    "components.d.ts",
+    "auto-imports.d.ts"
+  ]
+}

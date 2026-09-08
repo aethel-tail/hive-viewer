@@ -1,0 +1,11 @@
+{
+  "oxc.enable": true,
+  "editor.formatOnSave": true,
+  "editor.codeActionsOnSave": ["source.fixAll.stylelint"],
+  "stylelint.validate": ["css", "vue"],
+  "css.lint.vendorPrefix": "ignore",
+  "typescript.tsdk": "node_modules/typescript/lib",
+  "[css]": {
+    "editor.defaultFormatter": "stylelint.vscode-stylelint"
+  }
+}
