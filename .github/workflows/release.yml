@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows-installer:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+            shell-ext -> target
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          HUSKY: "0"
+
+      # 构建右键菜单 DLL → 生成/复用自签名证书 → 打包并签名稀疏包 msix → pnpm tauri build
+      - name: Build installer
+        run: pwsh -NoProfile -File scripts/build-release.ps1
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Hive Viewer ${{ github.ref_name }}
+          files: src-tauri/target/release/bundle/nsis/HiveViewer_*-setup.exe
+          generate_release_notes: true
+          body: |
+            Windows 桌面看图工具（Tauri 2 + Vue 3 + TypeScript）。
+
+            **安装**：下载下方 `HiveViewer_*_x64-setup.exe`（NSIS 安装包），需要 Windows 10 / 11 x64。
+            完整说明见 [README](https://github.com/aethel-tail/hive-viewer#readme)。
+          draft: false
+          prerelease: false
