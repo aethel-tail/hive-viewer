@@ -1,4 +1,4 @@
-import { ref, reactive, computed, watch } from "vue";
+import { ref, reactive, computed, watch, nextTick } from "vue";
 import { defineStore } from "pinia";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { LazyStore } from "@tauri-apps/plugin-store";
@@ -65,6 +65,9 @@ export const DEFAULT_CONVERT_SETTINGS = {
   customDir: "",
   prefix: "hive_",
 };
+
+// 转换设置的形状（持久化在 convert-settings.json，两窗口共享）
+export type ConvertSettings = typeof DEFAULT_CONVERT_SETTINGS;
 
 // 快捷键预设（小写 spec：修饰键 + 主键，如 'ctrl+r'、'arrowleft'；'digit' 表示 1~9 数字键）
 export const DEFAULT_SHORTCUTS = {
@@ -152,7 +155,7 @@ export const useViewerStore = defineStore("viewer", () => {
 
   // 转换设置存在独立的 convert-settings.json：独立转换窗口把 settings.json 设为只读
   //（setSettingsReadOnly）以避免与主窗口互相覆盖，但转换参数是它自己的数据，必须能
-  // 保存并在两个窗口之间共享，所以单开一个文件、只由转换对话框读写，不会互相 clobber。
+  // 保存并在两个窗口之间共享，所以单开一个文件；两窗口实时同步（见 applyRemoteConvertSettings）。
   const convertStore = new LazyStore("convert-settings.json");
   const convertSettings = reactive({ ...DEFAULT_CONVERT_SETTINGS });
   const convertSettingsEdited = ref(false);
@@ -420,6 +423,18 @@ export const useViewerStore = defineStore("viewer", () => {
     clearCaches();
     zoomMode.value = "fit";
     await loadImage(list[0].path);
+  }
+
+  // 空批次（--convert 无有效路径 / --convert-list 丢失或不可读）：清空队列回到无目标状态。
+  // 复用转换窗口时必须先清，否则错误面板会顶着上一批的标题（如「转换格式 - 3 张」）。
+  function clearConvertBatch() {
+    convertQueue.value = [];
+    files.value = [];
+    currentIndex.value = 0;
+    groupIndices.value = [];
+    dataUri.value = "";
+    dataUri2.value = "";
+    clearCaches();
   }
 
   function clearCaches() {
@@ -881,6 +896,38 @@ export const useViewerStore = defineStore("viewer", () => {
     }
   }
 
+  // ---- 跨窗口实时同步（convertSettings）----
+  // tauri-plugin-store 对同一路径只维护一份 Rust Store 实例与缓存，任一 webview 的 set
+  // 都会经 app.emit 向所有窗口广播 store://change，所以 onKeyChange 在两个窗口都会触发。
+  // 回灌远端值会命中下面的 deep watch → saveConvertSettings → 再次广播，形成
+  // set/save/change 死循环，因此用「跳过下一次保存」标记：
+  //  * 收到远端值 → 置标记 → 写 reactive（watch 默认 pre 队列，本轮 flush 才回调）
+  //  * watch 看到标记就只跳过落盘并清标记（本地编辑命中不到，标记只在回灌时置位）
+  //  * 远端值与本地完全相同时 watch 根本不触发，所以 nextTick 再清一次标记，
+  //    否则标记会一直挂着、吞掉紧随其后的一次真实本地编辑。
+  // 本地编辑来自 DOM 事件、远端值来自 IPC 事件，各自是独立的宏任务，
+  // 中间一定跑过一次 nextTick，所以两者不会互相误吞。
+  let skipNextConvertSave = false;
+
+  function applyRemoteConvertSettings(raw: unknown) {
+    if (!raw || typeof raw !== "object") {
+      return;
+    }
+    skipNextConvertSave = true;
+    sanitizeConvertSettings(raw);
+    // 远端值也算「已编辑」：晚到的初次 load 不许再把它覆盖回磁盘旧值
+    convertSettingsEdited.value = true;
+    void nextTick(() => {
+      skipNextConvertSave = false;
+    });
+  }
+
+  // 注册即弃：store 与 webview 同生命周期，不需要 unlisten；
+  // 非 Tauri 环境（纯浏览器调试）里 onKeyChange 会 reject，忽略即可，不能让 store 初始化失败。
+  void convertStore
+    .onKeyChange<Partial<ConvertSettings>>("convertSettings", applyRemoteConvertSettings)
+    .catch(() => {});
+
   // 只写变化的那一项（plugin-store 没有批量 set），再统一落盘
   async function saveSettings(keys: Record<string, unknown>) {
     if (settingsReadOnly) {
@@ -960,6 +1007,11 @@ export const useViewerStore = defineStore("viewer", () => {
     convertSettings,
     () => {
       convertSettingsEdited.value = true;
+      if (skipNextConvertSave) {
+        // 回灌远端值触发的回调：只更新 UI，不再落盘（否则两窗口互相广播）
+        skipNextConvertSave = false;
+        return;
+      }
       saveConvertSettings();
     },
     { deep: true },
@@ -1003,6 +1055,7 @@ export const useViewerStore = defineStore("viewer", () => {
     openFolder,
     openImageByPath,
     openConvertBatch,
+    clearConvertBatch,
     goPrev,
     goNext,
     setZoomMode,

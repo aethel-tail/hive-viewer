@@ -181,6 +181,9 @@ export const en: Record<keyof typeof zhCN, string> = {
   "convert.batchSaved": "Converted {ok} image(s)",
   "convert.batchSummary": "Done: {ok} succeeded, {fail} failed",
   "convert.batchFailedItem": "{name}: {msg}",
+  "convert.batchMoreFailures": "…and {n} more failure(s)",
+  "convert.listError":
+    "Could not read the images to convert (the temporary list may have expired, or there were no usable image paths). Please run the conversion again from File Explorer.",
 
   "toolbar.delete": "Delete",
 

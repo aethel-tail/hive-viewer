@@ -181,6 +181,9 @@ export const ja: Record<keyof typeof zhCN, string> = {
   "convert.batchSaved": "{ok} 枚を変換しました",
   "convert.batchSummary": "完了：成功 {ok} 枚、失敗 {fail} 枚",
   "convert.batchFailedItem": "{name}: {msg}",
+  "convert.batchMoreFailures": "…ほか {n} 件失敗",
+  "convert.listError":
+    "変換する画像を読み取れませんでした（一時リストが無効になったか、有効な画像パスがありませんでした）。エクスプローラーからもう一度変換を実行してください。",
 
   "toolbar.delete": "削除",
 

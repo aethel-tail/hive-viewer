@@ -179,6 +179,9 @@ export const zhCN = {
   "convert.batchSaved": "成功转换 {ok} 张",
   "convert.batchSummary": "转换完成：成功 {ok} 张，失败 {fail} 张",
   "convert.batchFailedItem": "{name}: {msg}",
+  "convert.batchMoreFailures": "……另有 {n} 项失败",
+  "convert.listError":
+    "无法读取待转换的图片（临时清单可能已失效，或没有可用的图片路径），请重新在资源管理器中执行转换。",
 
   "toolbar.delete": "删除",
 

@@ -113,7 +113,10 @@ fn trim_leading_zeros(digits: &[u8]) -> &[u8] {
 
 #[cfg(test)]
 mod tests {
-    use super::{convert_request, decode_image, is_owned_convert_list, natural_cmp, read_convert_list};
+    use super::{
+        convert_request, decode_image, is_convert_invocation, is_owned_convert_list, natural_cmp,
+        read_convert_list,
+    };
     use image::{DynamicImage, ImageFormat};
     use std::cmp::Ordering;
     use std::io::Cursor;
@@ -210,6 +213,19 @@ mod tests {
     }
 
     #[test]
+    fn is_convert_invocation_matches_only_convert_flags() {
+        assert!(is_convert_invocation(&argv(&["app.exe", "--convert", "a.jpg"])));
+        assert!(is_convert_invocation(&argv(&["app.exe", "--convert"])));
+        assert!(is_convert_invocation(&argv(&["app.exe", "--convert-list", "list.txt"])));
+        assert!(is_convert_invocation(&argv(&["app.exe", "--convert-list"])));
+        assert!(!is_convert_invocation(&argv(&["app.exe", "a.png"])));
+        assert!(!is_convert_invocation(&argv(&["app.exe"])));
+        assert!(!is_convert_invocation(&argv(&[])));
+        // 位置一致：只认第一个参数，图片路径里的同名串不算
+        assert!(!is_convert_invocation(&argv(&["app.exe", "a.png", "--convert"])));
+    }
+
+    #[test]
     fn convert_request_missing_list_file_is_none() {
         let file = TempFile::new("hive-convert-missing.txt");
         let arg = file.path().to_string_lossy().to_string();
@@ -265,6 +281,22 @@ mod tests {
 
         let img = decode_image(&file.path().to_string_lossy()).unwrap();
         assert_eq!((img.width(), img.height()), (3, 2));
+    }
+
+    #[test]
+    fn decode_image_rejects_avif_input_with_clear_error() {
+        // AVIF 只能浏览和输出，不能作为转换输入：image 的 avif 特性只带编码器，
+        // 解码需要 avif-native（刻意未启用）。这里真编一张 AVIF 再喂回去，
+        // 证明守卫是明确拒绝，而不是丢给不存在的解码器报含糊错误。
+        let file = TempFile::with_extension("hive-avif", "avif");
+        let mut avif = Cursor::new(Vec::new());
+        DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut avif, ImageFormat::Avif)
+            .unwrap();
+        std::fs::write(file.path(), avif.get_ref()).unwrap();
+
+        let err = decode_image(&file.path().to_string_lossy()).unwrap_err();
+        assert!(err.contains("AVIF"), "unexpected error: {}", err);
     }
 }
 
@@ -534,13 +566,17 @@ fn apply_resize(img: DynamicImage, o: &ConvertOptions) -> Result<DynamicImage, S
 
 /// 按文件内容嗅探格式解码，不信任扩展名：image::open 按扩展名选解码器，
 /// PNG 改名成 .jpg 会被丢给 JPEG 解码器直接失败（Chromium/image_dims 都按内容识别）。
+/// AVIF 例外：image 的 avif 特性只带编码器，解码要 avif-native（原生 dav1d，
+/// Windows 上还要 meson/ninja 工具链），这里刻意不启用 —— AVIF 只能浏览和输出。
 fn decode_image(path: &str) -> Result<DynamicImage, String> {
-    image::ImageReader::open(path)
+    let reader = image::ImageReader::open(path)
         .map_err(|e| format!("打开图片失败: {}", e))?
         .with_guessed_format()
-        .map_err(|e| format!("识别图片格式失败: {}", e))?
-        .decode()
-        .map_err(|e| format!("解码图片失败: {}", e))
+        .map_err(|e| format!("识别图片格式失败: {}", e))?;
+    if reader.format() == Some(image::ImageFormat::Avif) {
+        return Err("暂不支持 AVIF 输入解码，请先转换为其它格式".to_string());
+    }
+    reader.decode().map_err(|e| format!("解码图片失败: {}", e))
 }
 
 /// 解码 → 旋转 → 缩放/裁剪，转换与预览共用同一条管线
@@ -790,6 +826,14 @@ fn is_image_file(path: &str) -> bool {
     has_image_extension(Path::new(path))
 }
 
+/// 是否是转换类调用（--convert / --convert-list）。
+/// 与 `convert_request` 的区别：后者要求解析出至少一个有效图片路径，
+/// 而 `--convert-list` 的列表文件丢失/不可读时也会是 None —— 那种情况仍必须开
+/// 转换窗口报错，绝不能退化成主窗口（更不能留下一个没有窗口的进程）。
+fn is_convert_invocation(args: &[String]) -> bool {
+    matches!(args.get(1).map(String::as_str), Some("--convert") | Some("--convert-list"))
+}
+
 /// 解析转换类 CLI 参数：
 ///   --convert <路径...>       一个或多个图片路径（资源管理器单选/命令行）
 ///   --convert-list <文件>     右键菜单多选写入的临时列表文件，每行一个路径
@@ -881,6 +925,8 @@ fn open_main_window(app: &AppHandle, path: Option<String>) {
 /// 打开（或复用）独立转换窗口；主窗口保持原样，不被唤出。
 /// 路径列表先写入 PENDING_CONVERT：窗口新建时前端挂载后自取，
 /// 已存在时再补一个 convert-file 事件（事件早于监听时由 pending 兜底）。
+/// 空列表是合法输入：表示「转换调用但没解析出路径」（如列表文件丢失），
+/// 前端据此显示错误，而不是当作什么都没发生。
 fn open_convert_window(app: &AppHandle, paths: Vec<String>) {
     if let Ok(mut guard) = PENDING_CONVERT.lock() {
         *guard = Some(paths.clone());
@@ -1039,6 +1085,11 @@ pub fn run() {
                 open_convert_window(app, paths);
                 return;
             }
+            if is_convert_invocation(&argv) {
+                // 转换调用但列表文件丢失/不可读：开转换窗口显示错误，绝不唤起主窗口
+                open_convert_window(app, Vec::new());
+                return;
+            }
             open_main_window(app, argv.get(1).filter(|p| is_image_file(p)).cloned());
         }));
     }
@@ -1052,6 +1103,9 @@ pub fn run() {
             let args: Vec<String> = std::env::args().collect();
             if let Some(paths) = convert_request(&args) {
                 open_convert_window(app.handle(), paths);
+            } else if is_convert_invocation(&args) {
+                // 转换调用但列表文件丢失/不可读：开转换窗口显示错误，不创建主窗口
+                open_convert_window(app.handle(), Vec::new());
             } else {
                 open_main_window(app.handle(), args.get(1).filter(|f| is_image_file(f)).cloned());
             }

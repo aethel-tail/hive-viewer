@@ -195,6 +195,21 @@ watch(
   { immediate: true },
 );
 
+// 复用同一个转换窗口接下一批时，清掉上一批的结果面板（输出路径 / 批量摘要 / 错误）。
+// 放在预览 watch 之后：两者同时被换图触发，这里同步清空，refreshPreview 的 120ms 防抖
+// 之后才写 errorMsg，所以新目标自己的预览错误不会被吃掉。
+// 监听 convertQueue 的数组身份：openConvertBatch 每批都赋一个新数组，所以首路径和张数
+// 都相同的新批次（{a,b} → {a,c}）也能命中；首个目标路径覆盖主窗口换图的单张场景。
+// busy 时不清理：正在跑的这批由 doConvert 自己重置，中途清掉只会破坏进度展示。
+watch([() => store.convertQueue, () => file.value?.path], () => {
+  if (busy.value) {
+    return;
+  }
+  savedPath.value = "";
+  batchSummary.value = "";
+  errorMsg.value = "";
+});
+
 onUnmounted(() => {
   seq++;
   if (timer !== null) {
@@ -299,10 +314,15 @@ async function doConvert() {
       }
     } else {
       store.showToast(summary);
-      errorMsg.value = [
-        summary,
-        ...failures.map((f) => t("convert.batchFailedItem", { name: f.name, msg: f.msg })),
-      ].join("\n");
+      // 失败明细最多列前 5 条，其余折成一行，避免批量失败时面板无限拉长
+      const MAX_FAILURES = 5;
+      const lines = failures
+        .slice(0, MAX_FAILURES)
+        .map((f) => t("convert.batchFailedItem", { name: f.name, msg: f.msg }));
+      if (failures.length > MAX_FAILURES) {
+        lines.push(t("convert.batchMoreFailures", { n: failures.length - MAX_FAILURES }));
+      }
+      errorMsg.value = [summary, ...lines].join("\n");
     }
   } catch (e) {
     errorMsg.value = String(e);

@@ -180,6 +180,9 @@ export const zhTW: Record<keyof typeof zhCN, string> = {
   "convert.batchSaved": "成功轉換 {ok} 張",
   "convert.batchSummary": "轉換完成：成功 {ok} 張，失敗 {fail} 張",
   "convert.batchFailedItem": "{name}: {msg}",
+  "convert.batchMoreFailures": "……另有 {n} 項失敗",
+  "convert.listError":
+    "無法讀取待轉換的圖片（臨時清單可能已失效，或沒有可用的圖片路徑），請重新在檔案總管中執行轉換。",
 
   "toolbar.delete": "刪除",
 
