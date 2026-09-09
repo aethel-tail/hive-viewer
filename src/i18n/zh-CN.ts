@@ -181,7 +181,10 @@ export const zhCN = {
   "convert.batchFailedItem": "{name}: {msg}",
   "convert.batchMoreFailures": "……另有 {n} 项失败",
   "convert.listError":
-    "无法读取待转换的图片（临时清单可能已失效，或没有可用的图片路径），请重新在资源管理器中执行转换。",
+    "无法读取待转换的图片（临时清单可能已失效，或没有可用的图片路径）。请重新执行转换：在资源管理器中右键图片选择「格式转换」，或使用命令行 hive-viewer.exe --convert <图片路径>。",
+  "convert.pendingBatch": "上一批仍在转换 {done}/{total}，完成后点「开始转换」",
+  "convert.closeWhileBusy": "转换进行中，关闭后仍会继续。确定关闭吗？",
+  "convert.closeWhileBusyStandalone": "转换进行中，关闭窗口会中止剩余转换。确定关闭吗？",
 
   "toolbar.delete": "删除",
 

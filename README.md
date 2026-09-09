@@ -33,11 +33,12 @@ Hive Viewer（蜂巢看图）是一个面向 Windows 的极简桌面图片浏览
 - 输出格式：AVIF / WebP / JPEG / PNG / BMP
 - 旋转（按 EXIF 自动 / 90° / 180°）与缩放（contain / fit-width / pad 留白 / crop 裁剪 / stretch 拉伸）
 - 按格式提供质量或无损选项；重名不覆盖原文件，自动追加 `_1`、`_2`
-- 扩展名与实际格式不符的图片（例如 PNG 改名成 `.jpg`）也能正常转换：解码按文件内容识别格式，不依赖扩展名（AVIF 除外，见下一条）
-- AVIF 可以浏览、也可以作为转换的输出格式，但不能作为转换的输入：解码 AVIF 需要额外的原生 dav1d 解码器，当前刻意未启用；请先把 AVIF 转成其它格式再处理
+- 扩展名与实际格式不符的图片（例如 PNG 改名成 `.jpg`）也能正常转换：解码按文件内容识别格式，不依赖扩展名
+- AVIF 可浏览、可作为转换的输入与输出：解码走纯 Rust 的 dav1d（re_rav1d），不需要 meson/ninja/NASM 工具链；容器里的 irot/imir 方向会自动校正。仍不支持 grid（分块拼接）与动画（avis）AVIF，这类文件会返回明确错误
 - 资源管理器里多选图片 → 右键「格式转换」可整批转换：一个设置对话框依次处理全部图片，单张失败不中断，结束后汇总成功/失败数量
 - 转换设置（旋转 / 缩放 / 格式 / 质量 / 输出位置 / 文件名前缀）会持久化，重启后沿用；主窗口与独立转换窗口共用同一份持久化设置，任一窗口的修改都会实时同步到另一窗口
 - 可独立成窗口：`hive-viewer.exe --convert <图片路径...>`（可传多个路径；右键菜单多选时内部走 `--convert-list <临时列表文件>`），或使用右键菜单「格式转换」
+- 若 `--convert` 没有有效图片路径，或 `--convert-list` 的清单文件丢失/不可读，不会静默打开主窗口，而是打开转换窗口并显示错误提示
 
 **界面**
 
@@ -125,6 +126,7 @@ hive-viewer/
 │  └─ styles/                # 主题变量与全局样式
 ├─ src-tauri/                # Rust 后端与打包配置
 │  ├─ src/lib.rs             # 全部 Tauri 命令（打开/扫描、EXIF、转换、删除、右键菜单注册）
+│  ├─ vendor/dav1d-shim/     # 纯 Rust dav1d 垫片（re_rav1d），供 image 的 avif-native 使用
 │  ├─ windows/               # NSIS 模板、AppxManifest、稀疏包注册脚本
 │  └─ tauri.conf.json        # 窗口、资源、文件关联、NSIS 配置
 ├─ shell-ext/                # Windows 11 右键菜单 IExplorerCommand 实现（cdylib）
@@ -154,8 +156,10 @@ pnpm exec oxfmt .
 
 - 仅支持 Windows；右键菜单扩展依赖 Windows 11 的稀疏包（sparse package）机制
 - 右键菜单需要在安装版中注册（开发环境不可用），且注册需要管理员权限
-- 仓库暂无端到端测试（仅有少量 Rust 单元测试）
+- 仓库暂无端到端测试（仅有 20 个 Rust 单元测试）
 
 ## 许可证
 
 [MIT](LICENSE) © 2026 aethel-tail
+
+发行版包含第三方组件（re_rav1d、mp4parse、Tauri 等），其许可证与版权声明见 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)，该文件随安装包一同分发。

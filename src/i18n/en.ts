@@ -183,7 +183,13 @@ export const en: Record<keyof typeof zhCN, string> = {
   "convert.batchFailedItem": "{name}: {msg}",
   "convert.batchMoreFailures": "…and {n} more failure(s)",
   "convert.listError":
-    "Could not read the images to convert (the temporary list may have expired, or there were no usable image paths). Please run the conversion again from File Explorer.",
+    'Could not read the images to convert (the temporary list may have expired, or there were no usable image paths). Run the conversion again: right-click the images in File Explorer and choose "Convert format", or use the command line hive-viewer.exe --convert <image path>.',
+  "convert.pendingBatch":
+    'The previous batch is still converting {done}/{total}; click "Start" when it finishes',
+  "convert.closeWhileBusy":
+    "A conversion is still running. It will continue after closing. Close anyway?",
+  "convert.closeWhileBusyStandalone":
+    "A conversion is still running. Closing the window will stop the remaining conversions. Close anyway?",
 
   "toolbar.delete": "Delete",
 

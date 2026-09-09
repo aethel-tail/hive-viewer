@@ -2,7 +2,7 @@ import { ref, reactive, computed, watch, nextTick } from "vue";
 import { defineStore } from "pinia";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { LazyStore } from "@tauri-apps/plugin-store";
-import { t, type Locale } from "@/i18n";
+import { t, type Locale, type MessageKey } from "@/i18n";
 
 export interface ImageFile {
   name: string;
@@ -162,6 +162,25 @@ export const useViewerStore = defineStore("viewer", () => {
 
   // 批量转换队列（右键菜单多选 / --convert 多路径）；空 = 主窗口里的单张转换
   const convertQueue = ref<ImageFile[]>([]);
+
+  // 转换进行中的非持久化状态（不写任何 store 文件）：
+  //  * convertBusy：有批次正在跑；主窗口对话框卸载再打开也据此阻止第二个并发批次
+  //  * convertRunId：单调递增的批次序号；换批/关闭对话框时递增，让旧批的 UI 写入失效
+  //  * convertNotice：被取代批次的常驻状态条（两阶段：进行中进度 → 最终汇总+失败明细）
+  const convertBusy = ref(false);
+  const convertRunId = ref(0);
+  const convertNotice = ref<{ text: string; tone: "info" | "error" } | null>(null);
+
+  // 转换进行中关闭对话框/窗口前弹一次原生确认；空闲时直接放行。
+  // messageKey 由调用方区分：关闭对话框（后台继续）vs 关闭窗口（中止剩余转换）。
+  async function confirmConvertClose(
+    messageKey: MessageKey = "convert.closeWhileBusy",
+  ): Promise<boolean> {
+    if (!convertBusy.value) {
+      return true;
+    }
+    return askNative(t(messageKey), t("common.yes"), t("common.cancel"), "warning");
+  }
 
   // 轻提示（如缩放比例）；带 action 时提示可点击（用于更新提示 → 打开 Release 页面）
   const toast = reactive<{
@@ -860,36 +879,47 @@ export const useViewerStore = defineStore("viewer", () => {
     return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
   }
 
-  function sanitizeConvertSettings(raw: unknown) {
+  // 只接受白名单字段，非法值回退默认值（防手改文件/旧版本脏数据），返回新对象
+  function sanitizeConvertSettings(raw: unknown): ConvertSettings {
     const d = DEFAULT_CONVERT_SETTINGS;
     const s = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
-    convertSettings.rotation = oneOf(s.rotation, CONVERT_ROTATIONS, d.rotation);
-    convertSettings.resizeMode = oneOf(s.resizeMode, CONVERT_RESIZE_MODES, d.resizeMode);
-    convertSettings.width = positiveOrNull(s.width);
-    convertSettings.height = positiveOrNull(s.height);
-    convertSettings.padColor =
-      typeof s.padColor === "string" && /^#[0-9a-fA-F]{6}$/.test(s.padColor)
-        ? s.padColor
-        : d.padColor;
-    convertSettings.format = oneOf(s.format, CONVERT_FORMATS, d.format);
-    convertSettings.lossless = typeof s.lossless === "boolean" ? s.lossless : d.lossless;
-    convertSettings.quality =
-      typeof s.quality === "number" &&
-      Number.isFinite(s.quality) &&
-      s.quality >= 1 &&
-      s.quality <= 100
-        ? Math.round(s.quality)
-        : d.quality;
-    convertSettings.outMode = oneOf(s.outMode, CONVERT_OUT_MODES, d.outMode);
-    convertSettings.customDir = typeof s.customDir === "string" ? s.customDir : d.customDir;
-    convertSettings.prefix = typeof s.prefix === "string" ? s.prefix : d.prefix;
+    return {
+      rotation: oneOf(s.rotation, CONVERT_ROTATIONS, d.rotation),
+      resizeMode: oneOf(s.resizeMode, CONVERT_RESIZE_MODES, d.resizeMode),
+      width: positiveOrNull(s.width),
+      height: positiveOrNull(s.height),
+      padColor:
+        typeof s.padColor === "string" && /^#[0-9a-fA-F]{6}$/.test(s.padColor)
+          ? s.padColor
+          : d.padColor,
+      format: oneOf(s.format, CONVERT_FORMATS, d.format),
+      lossless: typeof s.lossless === "boolean" ? s.lossless : d.lossless,
+      quality:
+        typeof s.quality === "number" &&
+        Number.isFinite(s.quality) &&
+        s.quality >= 1 &&
+        s.quality <= 100
+          ? Math.round(s.quality)
+          : d.quality,
+      outMode: oneOf(s.outMode, CONVERT_OUT_MODES, d.outMode),
+      customDir: typeof s.customDir === "string" ? s.customDir : d.customDir,
+      prefix: typeof s.prefix === "string" ? s.prefix : d.prefix,
+    };
   }
+
+  const CONVERT_SETTING_KEYS = Object.keys(DEFAULT_CONVERT_SETTINGS) as (keyof ConvertSettings)[];
+
+  // 「上次已落盘」的快照（纯内存）：saveConvertSettings 只把与之不同的白名单字段
+  // 交给后端原子 patch 命令，避免两窗口同一 IPC 往返内整对象写入互相覆盖。
+  let lastSavedConvertSettings: ConvertSettings = { ...DEFAULT_CONVERT_SETTINGS };
 
   async function loadConvertSettings() {
     try {
       const raw = await convertStore.get("convertSettings");
+      // 快照始终代表磁盘现状（即使本地已先编辑、不回灌 UI，后续 diff 也以磁盘为基准）
+      lastSavedConvertSettings = sanitizeConvertSettings(raw);
       if (!convertSettingsEdited.value) {
-        sanitizeConvertSettings(raw);
+        Object.assign(convertSettings, lastSavedConvertSettings);
       }
     } catch (e) {
       console.error("Failed to load convert settings:", e);
@@ -913,8 +943,23 @@ export const useViewerStore = defineStore("viewer", () => {
     if (!raw || typeof raw !== "object") {
       return;
     }
+    const clean = sanitizeConvertSettings(raw);
+    // 本地尚未落盘的字段（相对 lastSaved 的 diff）不能被远端整对象回灌覆盖：
+    // 否则「本地改了 A、另一窗口改了 B」时，A 的界面值会被远端旧值顶掉，
+    // 下一次编辑再把旧值写回磁盘。只回灌非脏字段，脏字段继续由保存链推进。
+    const dirty = new Set(
+      CONVERT_SETTING_KEYS.filter((key) => convertSettings[key] !== lastSavedConvertSettings[key]),
+    );
+    // 远端值 = 磁盘现状：快照同步更新，随后的本地编辑只 diff 出真正改过的字段
+    lastSavedConvertSettings = clean;
     skipNextConvertSave = true;
-    sanitizeConvertSettings(raw);
+    const partial: Partial<ConvertSettings> = {};
+    for (const key of CONVERT_SETTING_KEYS) {
+      if (!dirty.has(key)) {
+        (partial as Record<string, unknown>)[key] = clean[key];
+      }
+    }
+    Object.assign(convertSettings, partial);
     // 远端值也算「已编辑」：晚到的初次 load 不许再把它覆盖回磁盘旧值
     convertSettingsEdited.value = true;
     void nextTick(() => {
@@ -945,10 +990,29 @@ export const useViewerStore = defineStore("viewer", () => {
 
   // 不走 settingsReadOnly：独立转换窗口只读的是 settings.json，
   // 转换设置是它自己的文件，两窗口都能写、也都需要持久化。
-  async function saveConvertSettings() {
+  // 唯一写入口是后端原子 patch 命令 update_convert_settings（Rust 侧串行 merge + save），
+  // 前端只发相对快照有变化的字段；禁止再出现整对象 set。
+  // 保存链串行化：上一笔返回前不算下一笔 diff，快照与磁盘按顺序推进（快速连改不丢字段）。
+  let convertSaveChain: Promise<void> = Promise.resolve();
+
+  function saveConvertSettings(): Promise<void> {
+    convertSaveChain = convertSaveChain.then(doSaveConvertSettings, doSaveConvertSettings);
+    return convertSaveChain;
+  }
+
+  async function doSaveConvertSettings() {
+    const patch: Record<string, unknown> = {};
+    for (const key of CONVERT_SETTING_KEYS) {
+      if (convertSettings[key] !== lastSavedConvertSettings[key]) {
+        patch[key] = convertSettings[key];
+      }
+    }
+    if (Object.keys(patch).length === 0) {
+      return;
+    }
     try {
-      await convertStore.set("convertSettings", { ...convertSettings });
-      await convertStore.save();
+      const merged = await invoke<ConvertSettings>("update_convert_settings", { patch });
+      lastSavedConvertSettings = sanitizeConvertSettings(merged);
     } catch (e) {
       console.error("Failed to save convert settings:", e);
     }
@@ -1038,6 +1102,10 @@ export const useViewerStore = defineStore("viewer", () => {
     exifPanelVisible,
     convertSettings,
     convertQueue,
+    convertBusy,
+    convertRunId,
+    convertNotice,
+    confirmConvertClose,
     slideshowActive,
     slideshowInterval,
     slideshowOrder,

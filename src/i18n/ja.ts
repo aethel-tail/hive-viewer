@@ -183,7 +183,12 @@ export const ja: Record<keyof typeof zhCN, string> = {
   "convert.batchFailedItem": "{name}: {msg}",
   "convert.batchMoreFailures": "…ほか {n} 件失敗",
   "convert.listError":
-    "変換する画像を読み取れませんでした（一時リストが無効になったか、有効な画像パスがありませんでした）。エクスプローラーからもう一度変換を実行してください。",
+    "変換する画像を読み取れませんでした（一時リストが無効になったか、有効な画像パスがありませんでした）。もう一度変換を実行してください：エクスプローラーで画像を右クリックして「形式変換」を選ぶか、コマンドライン hive-viewer.exe --convert <画像パス> を使用します。",
+  "convert.pendingBatch":
+    "前のバッチを変換中 {done}/{total}。完了後に「変換開始」をクリックしてください",
+  "convert.closeWhileBusy": "変換を実行中です。閉じても処理は続行されます。閉じますか？",
+  "convert.closeWhileBusyStandalone":
+    "変換を実行中です。ウィンドウを閉じると残りの変換は中止されます。閉じますか？",
 
   "toolbar.delete": "削除",
 

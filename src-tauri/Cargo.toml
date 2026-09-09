@@ -1,6 +1,6 @@
 [package]
 name = "hive-viewer"
-version = "1.2.0"
+version = "1.2.1"
 description = "Minimal image browser"
 edition = "2021"
 license = "MIT"
@@ -21,12 +21,21 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-store = "2"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
-image = { version = "0.25", features = ["avif"] }
+image = { version = "0.25", features = ["avif", "avif-native"] }
 # image crate 的 WebP 编码只有无损；有损 WebP 走 libwebp（C 构建，需 MSVC）
 webp = "0.3"
+# AVIF 容器方向（irot/imir）：image 的 AVIF 解码器只取主 item 的压缩数据，
+# 不应用容器变换，需要自己读 meta 里的方向属性
+mp4parse = "0.17"
 kamadak-exif = "0.5"
 trash = "5.2.8"
 serde_json = "1.0.151"
+
+# image 的 avif-native 依赖 crates.io 的 dav1d（C 库，需要 meson/ninja）。
+# 这里替换成 vendor/dav1d-shim：同名同版本的纯 Rust 垫片，内部 re-export
+# re_rav1d（Rust 版 dav1d），因此 Windows 上无需 meson/ninja/NASM 工具链。
+[patch.crates-io]
+dav1d = { path = "vendor/dav1d-shim" }
 
 # 官方推荐：更小的二进制 + 更快的启动/扫描（Windows Defender 对体积敏感）
 [profile.release]
@@ -39,6 +48,10 @@ strip = true
 # 全局 opt-level=s 控体积；图像编解码是 CPU 热点，这些 crate 单独提到 3
 # （二进制约增加几百 KB，解码/缩放/AVIF 编码实测更快）
 [profile.release.package.rav1e]
+opt-level = 3
+
+# 纯 Rust 的 dav1d 解码器同样按热点处理（AVIF 解码）
+[profile.release.package.re_rav1d]
 opt-level = 3
 
 [profile.release.package.ravif]

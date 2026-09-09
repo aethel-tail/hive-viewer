@@ -105,6 +105,7 @@ async function exitFullscreen() {
 
 // escToExit：关窗即退出（最后一个窗口关闭时应用默认退出）
 async function exitApp() {
+  closingApp = true;
   try {
     await getCurrentWebviewWindow().close();
   } catch (e) {
@@ -143,6 +144,9 @@ function spawnRipple(e: PointerEvent) {
 
 let unlistenOpenFile: UnlistenFn | null = null;
 let unlistenDragDrop: UnlistenFn | null = null;
+let unlistenClose: UnlistenFn | null = null;
+// 程序主动关窗时置位，避免 onCloseRequested 再次弹确认
+let closingApp = false;
 
 // 拖入图片：Tauri 默认拦截 HTML5 拖放（dragDropEnabled），改用窗口 drag-drop 事件取文件路径
 const dragging = ref(false);
@@ -213,7 +217,12 @@ function onKeydown(e: KeyboardEvent) {
     // ConvertDialog 内 input 的 Esc 由组件自身 @keydown.esc.stop 处理；此处兜底焦点在外的情况
     if (convertVisible.value) {
       e.preventDefault();
-      convertVisible.value = false;
+      // 转换进行中先弹一次确认（关闭后旧批继续跑）；确认通过才关对话框
+      void store.confirmConvertClose().then((ok) => {
+        if (ok) {
+          convertVisible.value = false;
+        }
+      });
       return;
     }
     if (settingsVisible.value) {
@@ -346,6 +355,19 @@ onMounted(async () => {
     const win = getCurrentWebviewWindow();
     isFullscreen.value = await win.isFullscreen();
   } catch {}
+
+  // 原生标题栏 X / Alt+F4：转换进行中时确认（关窗即退出，会中止剩余转换）
+  unlistenClose = await getCurrentWebviewWindow().onCloseRequested((event) => {
+    if (closingApp || !store.convertBusy) {
+      return;
+    }
+    event.preventDefault();
+    void (async () => {
+      if (await store.confirmConvertClose("convert.closeWhileBusyStandalone")) {
+        await exitApp();
+      }
+    })();
+  });
 });
 
 onUnmounted(() => {
@@ -354,6 +376,7 @@ onUnmounted(() => {
   window.removeEventListener("contextmenu", onContextMenu);
   unlistenOpenFile?.();
   unlistenDragDrop?.();
+  unlistenClose?.();
 });
 </script>
 

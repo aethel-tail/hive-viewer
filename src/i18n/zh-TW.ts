@@ -182,7 +182,10 @@ export const zhTW: Record<keyof typeof zhCN, string> = {
   "convert.batchFailedItem": "{name}: {msg}",
   "convert.batchMoreFailures": "……另有 {n} 項失敗",
   "convert.listError":
-    "無法讀取待轉換的圖片（臨時清單可能已失效，或沒有可用的圖片路徑），請重新在檔案總管中執行轉換。",
+    "無法讀取待轉換的圖片（臨時清單可能已失效，或沒有可用的圖片路徑）。請重新執行轉換：在檔案總管中右鍵圖片選擇「格式轉換」，或使用命令列 hive-viewer.exe --convert <圖片路徑>。",
+  "convert.pendingBatch": "上一批仍在轉換 {done}/{total}，完成後點「開始轉換」",
+  "convert.closeWhileBusy": "轉換進行中，關閉後仍會繼續。確定關閉嗎？",
+  "convert.closeWhileBusyStandalone": "轉換進行中，關閉視窗會中止剩餘轉換。確定關閉嗎？",
 
   "toolbar.delete": "刪除",
 

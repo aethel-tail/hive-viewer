@@ -55,12 +55,28 @@ const quality = computed({
   },
 });
 
-const busy = ref(false);
 const errorMsg = ref("");
 // standalone 下的结果展示：单张 = 输出路径；批量 = 全部成功时的摘要
 const savedPath = ref("");
 const batchSummary = ref("");
 const progress = ref({ done: 0, total: 0 });
+
+// 本批是否仍由面板承载进度/结果：被新批次取代后（store.convertNotice 出现）改走常驻状态条
+const panelRunning = computed(() => store.convertBusy && store.convertNotice === null);
+
+// 开始按钮文案：busy 时显示进度（未取到进度则只显示“转换中”），空闲时显示“开始转换”
+const startLabel = computed(() => {
+  if (!store.convertBusy) {
+    return t("convert.start");
+  }
+  if (panelRunning.value && isBatch.value && progress.value.total > 0) {
+    return t("convert.convertingProgress", {
+      done: progress.value.done,
+      total: progress.value.total,
+    });
+  }
+  return t("convert.converting");
+});
 
 // 批量队列优先；否则主窗口/独立窗口里的单张当前图。预览只画第一个目标。
 const targets = computed(() =>
@@ -195,14 +211,24 @@ watch(
   { immediate: true },
 );
 
-// 复用同一个转换窗口接下一批时，清掉上一批的结果面板（输出路径 / 批量摘要 / 错误）。
+// 换批/换图时的清理：busy 时不能静默返回，也不能清面板（旧批还在往这里写）——
+// 递增 store.convertRunId 作废旧批的 UI 写入，改用常驻状态条承载旧批进度/结果。
 // 放在预览 watch 之后：两者同时被换图触发，这里同步清空，refreshPreview 的 120ms 防抖
 // 之后才写 errorMsg，所以新目标自己的预览错误不会被吃掉。
 // 监听 convertQueue 的数组身份：openConvertBatch 每批都赋一个新数组，所以首路径和张数
 // 都相同的新批次（{a,b} → {a,c}）也能命中；首个目标路径覆盖主窗口换图的单张场景。
-// busy 时不清理：正在跑的这批由 doConvert 自己重置，中途清掉只会破坏进度展示。
 watch([() => store.convertQueue, () => file.value?.path], () => {
-  if (busy.value) {
+  if (store.convertBusy) {
+    store.convertRunId++;
+    // 同时作废正在跑的预览（120ms 防抖内可能返回旧的错误，不能落到新批次的面板里）
+    seq++;
+    store.convertNotice = {
+      text: t("convert.pendingBatch", {
+        done: progress.value.done,
+        total: progress.value.total,
+      }),
+      tone: "info",
+    };
     return;
   }
   savedPath.value = "";
@@ -212,6 +238,9 @@ watch([() => store.convertQueue, () => file.value?.path], () => {
 
 onUnmounted(() => {
   seq++;
+  // 对话框卸载（主窗口关闭/切图）时作废旧批的 UI 写入：旧批继续在后台跑完，
+  // 进度/结果改走 store.convertNotice；convertBusy 由 doConvert 的 finally 清除。
+  store.convertRunId++;
   if (timer !== null) {
     clearTimeout(timer);
   }
@@ -228,10 +257,23 @@ async function browse() {
   }
 }
 
+// 关闭确认：转换进行中弹一次原生确认。
+// 主窗口对话框关闭后旧批继续在后台跑完；独立转换窗口关闭会销毁 webview、中止剩余转换，
+// 因此两者用不同措辞（standalone 用“关闭窗口会中止剩余转换”）。
+async function requestClose() {
+  const key = props.standalone ? "convert.closeWhileBusyStandalone" : "convert.closeWhileBusy";
+  if (await store.confirmConvertClose(key)) {
+    emit("close");
+  }
+}
+
 async function doConvert() {
-  if (!file.value || busy.value) {
+  if (!file.value || store.convertBusy) {
     return;
   }
+  // 批次序号：所有 await 之后的 UI 写入都先核对它；被新批次取代的旧批只写常驻状态条
+  const runId = ++store.convertRunId;
+  store.convertNotice = null;
   errorMsg.value = "";
   savedPath.value = "";
   batchSummary.value = "";
@@ -242,8 +284,10 @@ async function doConvert() {
     errorMsg.value = t("convert.invalidSize");
     return;
   }
-  const list = targets.value;
-  if (list.length === 0) {
+  // 快照队列与总数：转换期间换批不影响正在跑的这一批的进度/计数
+  const list = targets.value.slice();
+  const runTotal = list.length;
+  if (runTotal === 0) {
     return;
   }
   // 快照：批量转换期间改设置不应影响正在跑的这一批（尤其 outMode 决定输出目录）
@@ -251,10 +295,12 @@ async function doConvert() {
   const outMode = cs.outMode;
   const customDirPath = customDir.value;
 
-  busy.value = true;
-  progress.value = { done: 0, total: list.length };
+  // 第一个 await 前同步置位（store 级）：主窗口对话框卸载再打开也不会误判空闲、起第二个并发批次
+  store.convertBusy = true;
+  progress.value = { done: 0, total: runTotal };
   const failures: { name: string; msg: string }[] = [];
   let ok = 0;
+  let done = 0;
   let lastSaved = "";
   try {
     // 输出目录只解析一次：original 每张各自的目录，pictures/custom 共享
@@ -283,8 +329,36 @@ async function doConvert() {
       } catch (e) {
         failures.push({ name: item.name, msg: String(e) });
       } finally {
-        progress.value = { done: progress.value.done + 1, total: list.length };
+        done += 1;
+        if (runId === store.convertRunId) {
+          progress.value = { done, total: runTotal };
+        } else {
+          // 已被新批次取代：进度改走常驻状态条，不再写面板
+          store.convertNotice = {
+            text: t("convert.pendingBatch", { done, total: runTotal }),
+            tone: "info",
+          };
+        }
       }
+    }
+
+    // 被取代的旧批跑完：汇总（含最多 5 条失败明细）留在状态条上，
+    // 不写 savedPath / batchSummary / errorMsg，也不弹 toast / 关对话框。
+    if (runId !== store.convertRunId) {
+      const summary = t("convert.batchSummary", { ok, fail: failures.length });
+      // 失败明细最多列前 5 条，其余折成一行，避免批量失败时状态条无限拉长
+      const MAX_FAILURES = 5;
+      const lines = failures
+        .slice(0, MAX_FAILURES)
+        .map((f) => t("convert.batchFailedItem", { name: f.name, msg: f.msg }));
+      if (failures.length > MAX_FAILURES) {
+        lines.push(t("convert.batchMoreFailures", { n: failures.length - MAX_FAILURES }));
+      }
+      store.convertNotice = {
+        text: failures.length > 0 ? [summary, ...lines].join("\n") : summary,
+        tone: failures.length > 0 ? "error" : "info",
+      };
+      return;
     }
 
     if (list.length === 1) {
@@ -325,31 +399,48 @@ async function doConvert() {
       errorMsg.value = [summary, ...lines].join("\n");
     }
   } catch (e) {
-    errorMsg.value = String(e);
+    if (runId === store.convertRunId) {
+      errorMsg.value = String(e);
+    } else {
+      store.convertNotice = { text: String(e), tone: "error" };
+    }
   } finally {
-    busy.value = false;
+    store.convertBusy = false;
   }
 }
 </script>
 
 <template>
-  <div
-    class="convert-overlay"
-    :class="{ standalone: props.standalone }"
-    @click.self="emit('close')"
-  >
-    <div class="convert-dialog" @keydown.esc.stop="emit('close')">
+  <div class="convert-overlay" :class="{ standalone: props.standalone }" @click.self="requestClose">
+    <div class="convert-dialog" @keydown.esc.stop="requestClose">
       <header v-if="!props.standalone" class="cd-header">
         <span class="cd-title">{{ t("convert.title") }}</span>
         <button
           type="button"
           class="cd-close"
           :aria-label="t('settings.close')"
-          @click="emit('close')"
+          @click="requestClose"
         >
           ×
         </button>
       </header>
+
+      <!-- 常驻状态条：被新批次取代的旧批进度/结果（不随 toast 消失，可手动关闭） -->
+      <div
+        v-if="store.convertNotice"
+        class="cd-notice"
+        :class="`cd-notice-${store.convertNotice.tone}`"
+      >
+        <span class="cd-notice-text">{{ store.convertNotice.text }}</span>
+        <button
+          type="button"
+          class="cd-notice-close"
+          :aria-label="t('settings.close')"
+          @click="store.convertNotice = null"
+        >
+          ×
+        </button>
+      </div>
 
       <div class="cd-body">
         <div class="cd-settings">
@@ -452,7 +543,7 @@ async function doConvert() {
             </div>
           </section>
 
-          <div v-if="busy && isBatch" class="cd-progress">
+          <div v-if="panelRunning && isBatch" class="cd-progress">
             {{ t("convert.convertingProgress", { done: progress.done, total: progress.total }) }}
           </div>
 
@@ -466,17 +557,8 @@ async function doConvert() {
             <span class="cd-success-label">✓ {{ batchSummary }}</span>
           </div>
 
-          <button type="button" class="cd-start" :disabled="busy" @click="doConvert">
-            {{
-              busy
-                ? isBatch
-                  ? t("convert.convertingProgress", {
-                      done: progress.done,
-                      total: progress.total,
-                    })
-                  : t("convert.converting")
-                : t("convert.start")
-            }}
+          <button type="button" class="cd-start" :disabled="store.convertBusy" @click="doConvert">
+            {{ startLabel }}
           </button>
         </div>
 
@@ -574,6 +656,51 @@ async function doConvert() {
 }
 
 .cd-close:hover {
+  opacity: 0.6;
+}
+
+.cd-notice {
+  display: flex;
+  flex-shrink: 0;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-alpha);
+}
+
+.cd-notice-info {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.cd-notice-error {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.cd-notice-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  word-break: break-all;
+  white-space: pre-line;
+}
+
+.cd-notice-close {
+  flex-shrink: 0;
+  padding: 0 4px;
+  font-size: 1rem;
+  line-height: 1;
+  color: inherit;
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  transition: opacity 150ms;
+}
+
+.cd-notice-close:hover {
   opacity: 0.6;
 }
 

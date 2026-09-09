@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -8,6 +9,7 @@ use image::{DynamicImage, imageops::FilterType};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_store::StoreExt;
 
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp", "bmp", "avif"];
 
@@ -16,6 +18,9 @@ static INITIAL_FILE: Mutex<Option<String>> = Mutex::new(None);
 /// 兜住「窗口已创建但 webview 尚未挂载监听」的竞态。
 /// 多选批量转换时是整个路径列表。
 static PENDING_CONVERT: Mutex<Option<Vec<String>>> = Mutex::new(None);
+/// 串行化 update_convert_settings 的 get+merge+set+save：两个窗口在同一 IPC 往返内
+/// 并发改不同字段时，没有它就会读-改-写互相覆盖（旧整对象 set 的问题）。
+static CONVERT_SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Serialize, Clone)]
 struct ImageFile {
@@ -114,8 +119,9 @@ fn trim_leading_zeros(digits: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::{
-        convert_request, decode_image, is_convert_invocation, is_owned_convert_list, natural_cmp,
-        read_convert_list,
+        avif_container_orientation, avif_exif_orientation, convert_request, decode_image,
+        image_dims, is_convert_invocation, is_owned_convert_list, merge_convert_patch, natural_cmp,
+        process_image, read_convert_list, read_orientation, ConvertOptions,
     };
     use image::{DynamicImage, ImageFormat};
     use std::cmp::Ordering;
@@ -173,6 +179,10 @@ mod tests {
 
         fn write(&self, text: &str) {
             std::fs::write(&self.0, text).unwrap();
+        }
+
+        fn write_bytes(&self, bytes: &[u8]) {
+            std::fs::write(&self.0, bytes).unwrap();
         }
     }
 
@@ -283,20 +293,240 @@ mod tests {
         assert_eq!((img.width(), img.height()), (3, 2));
     }
 
-    #[test]
-    fn decode_image_rejects_avif_input_with_clear_error() {
-        // AVIF 只能浏览和输出，不能作为转换输入：image 的 avif 特性只带编码器，
-        // 解码需要 avif-native（刻意未启用）。这里真编一张 AVIF 再喂回去，
-        // 证明守卫是明确拒绝，而不是丢给不存在的解码器报含糊错误。
-        let file = TempFile::with_extension("hive-avif", "avif");
-        let mut avif = Cursor::new(Vec::new());
-        DynamicImage::new_rgb8(2, 2)
-            .write_to(&mut avif, ImageFormat::Avif)
-            .unwrap();
-        std::fs::write(file.path(), avif.get_ref()).unwrap();
+    // ---- 转换设置的原子 patch（KNOWN_ISSUES item 2 后端） ----
 
-        let err = decode_image(&file.path().to_string_lossy()).unwrap_err();
-        assert!(err.contains("AVIF"), "unexpected error: {}", err);
+    #[test]
+    fn merge_convert_patch_merges_disjoint_fields() {
+        let current = serde_json::json!({ "format": "png", "quality": 80 });
+        let patch = serde_json::json!({ "rotation": "cw90", "prefix": "hive_" });
+        let merged = merge_convert_patch(&current, &patch).unwrap();
+        assert_eq!(merged["format"], serde_json::json!("png"));
+        assert_eq!(merged["quality"], serde_json::json!(80));
+        assert_eq!(merged["rotation"], serde_json::json!("cw90"));
+        assert_eq!(merged["prefix"], serde_json::json!("hive_"));
+    }
+
+    #[test]
+    fn merge_convert_patch_rejects_unknown_keys() {
+        let err = merge_convert_patch(&serde_json::json!({}), &serde_json::json!({ "evil": 1 }))
+            .unwrap_err();
+        assert!(err.contains("evil"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn merge_convert_patch_allows_null_width_and_height() {
+        let current = serde_json::json!({ "width": 800, "height": 600 });
+        let merged = merge_convert_patch(&current, &serde_json::json!({ "width": null })).unwrap();
+        assert!(merged["width"].is_null(), "width should be cleared: {}", merged);
+        assert_eq!(merged["height"], serde_json::json!(600));
+    }
+
+    #[test]
+    fn merge_convert_patch_clamps_quality() {
+        let hi = merge_convert_patch(&serde_json::json!({}), &serde_json::json!({ "quality": 250 }))
+            .unwrap();
+        assert_eq!(hi["quality"], serde_json::json!(100));
+        let lo = merge_convert_patch(&serde_json::json!({}), &serde_json::json!({ "quality": -3 }))
+            .unwrap();
+        assert_eq!(lo["quality"], serde_json::json!(1));
+        let rounded =
+            merge_convert_patch(&serde_json::json!({}), &serde_json::json!({ "quality": 82.6 }))
+                .unwrap();
+        assert_eq!(rounded["quality"], serde_json::json!(83));
+    }
+
+    #[test]
+    fn merge_convert_patch_rejects_non_object_patch() {
+        assert!(merge_convert_patch(&serde_json::json!({}), &serde_json::json!([1, 2])).is_err());
+        assert!(merge_convert_patch(&serde_json::json!({}), &serde_json::json!("nope")).is_err());
+    }
+
+    // ---- AVIF 输入（image avif-native + vendor/dav1d-shim） ----
+
+    /// 用 image 的 AVIF 编码器（ravif）生成 8-bit 测试文件。
+    fn write_avif(name: &str, img: &DynamicImage) -> TempFile {
+        let mut buf = Cursor::new(Vec::new());
+        img.write_to(&mut buf, ImageFormat::Avif).unwrap();
+        let file = TempFile::with_extension(name, "avif");
+        file.write_bytes(buf.get_ref());
+        file
+    }
+
+    fn avif_path(file: &TempFile) -> String {
+        file.path().to_string_lossy().to_string()
+    }
+
+    fn solid_rgba(w: u32, h: u32, color: [u8; 4]) -> DynamicImage {
+        DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(w, h, image::Rgba(color)))
+    }
+
+    /// 带梯度：让 mdat 里有真实码流，截断/损坏类测试才有意义。
+    fn gradient_rgba(w: u32, h: u32) -> DynamicImage {
+        let mut img = image::RgbaImage::new(w, h);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            *p = image::Rgba([
+                (x * 17 % 256) as u8,
+                (y * 29 % 256) as u8,
+                ((x + y) * 13 % 256) as u8,
+                255,
+            ]);
+        }
+        DynamicImage::ImageRgba8(img)
+    }
+
+    fn convert_opts(rotation: &str, resize_mode: &str) -> ConvertOptions {
+        ConvertOptions {
+            rotation: rotation.to_string(),
+            resize_mode: resize_mode.to_string(),
+            width: None,
+            height: None,
+            pad_color: None,
+            format: "png".to_string(),
+            lossless: false,
+            quality: None,
+            prefix: String::new(),
+        }
+    }
+
+    #[test]
+    fn decode_image_accepts_avif_input() {
+        let file = write_avif("hive-avif-decode", &solid_rgba(8, 6, [200, 60, 40, 255]));
+        let img = decode_image(&avif_path(&file)).unwrap();
+        assert_eq!((img.width(), img.height()), (8, 6));
+        // 有损编码：颜色大致保留即可
+        let p = img.to_rgba8().get_pixel(0, 0).0;
+        assert!((p[0] as i32 - 200).abs() < 40, "red drift: {:?}", p);
+        assert!((p[1] as i32 - 60).abs() < 40, "green drift: {:?}", p);
+        assert!((p[2] as i32 - 40).abs() < 40, "blue drift: {:?}", p);
+        assert!(p[3] > 200, "opaque alpha expected, got {:?}", p);
+    }
+
+    #[test]
+    fn avif_alpha_round_trip() {
+        let file = write_avif("hive-avif-alpha", &solid_rgba(4, 4, [180, 40, 220, 128]));
+        let img = decode_image(&avif_path(&file)).unwrap();
+        assert_eq!((img.width(), img.height()), (4, 4));
+        let p = img.to_rgba8().get_pixel(0, 0).0;
+        assert!(p[3] > 80 && p[3] < 180, "lossy alpha should stay near 128, got {}", p[3]);
+    }
+
+    #[test]
+    fn decode_image_rejects_animated_avif_with_clear_error() {
+        // 最小 ftyp(avis) 头：is_animated_avif 应当识别，decode_image 给出明确错误
+        let file = TempFile::with_extension("hive-avis", "avif");
+        file.write_bytes(b"\0\0\0\x14ftypavis\0\0\0\0avis");
+        let err = decode_image(&avif_path(&file)).unwrap_err();
+        assert!(err.contains("avis"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn process_image_avif_rotate_resize() {
+        let file = write_avif("hive-avif-process", &gradient_rgba(16, 8));
+        let path = avif_path(&file);
+
+        // cw90：16x8 → 8x16，再 contain 进 8x8 → 4x8
+        let mut o = convert_opts("cw90", "contain");
+        o.width = Some(8);
+        o.height = Some(8);
+        let img = process_image(&path, &o).unwrap();
+        assert_eq!((img.width(), img.height()), (4, 8));
+
+        // pad：输出严格等于目标框
+        o.resize_mode = "pad".to_string();
+        o.width = Some(12);
+        o.height = Some(12);
+        o.pad_color = Some("#ff0000".to_string());
+        let img = process_image(&path, &o).unwrap();
+        assert_eq!((img.width(), img.height()), (12, 12));
+
+        // crop：输出严格等于目标框
+        o.rotation = "none".to_string();
+        o.resize_mode = "crop".to_string();
+        o.width = Some(6);
+        o.height = Some(6);
+        let img = process_image(&path, &o).unwrap();
+        assert_eq!((img.width(), img.height()), (6, 6));
+    }
+
+    #[test]
+    fn avif_malformed_inputs_return_err() {
+        // 随机字节：连格式都嗅探不出
+        let random = TempFile::with_extension("hive-avif-random", "avif");
+        random.write_bytes(&[0xA5; 64]);
+        assert!(decode_image(&avif_path(&random)).is_err());
+
+        // 空文件
+        let empty = TempFile::with_extension("hive-avif-empty", "avif");
+        empty.write_bytes(&[]);
+        assert!(decode_image(&avif_path(&empty)).is_err());
+
+        // 合法 AVIF 的破坏样本：截断 / 后半清零 / 尾部涂改 —— 都必须 Err 且不 panic
+        let mut buf = Cursor::new(Vec::new());
+        gradient_rgba(16, 16).write_to(&mut buf, ImageFormat::Avif).unwrap();
+        let bytes = buf.into_inner();
+        assert!(bytes.len() > 128, "sanity: encoded avif should not be tiny");
+
+        let truncated = TempFile::with_extension("hive-avif-truncated", "avif");
+        truncated.write_bytes(&bytes[..bytes.len() / 2]);
+        assert!(decode_image(&avif_path(&truncated)).is_err());
+
+        let mut half_zeroed = bytes.clone();
+        let mid = half_zeroed.len() / 2;
+        half_zeroed[mid..].fill(0);
+        let half_zeroed_file = TempFile::with_extension("hive-avif-halfzero", "avif");
+        half_zeroed_file.write_bytes(&half_zeroed);
+        assert!(decode_image(&avif_path(&half_zeroed_file)).is_err());
+
+        // 尾部涂改：把最后一个 box 的头部（size/type）涂成 0xFF。
+        // 直接涂 0xFF 到文件末尾不一定致命（AV1 解码器可能忽略尾随字节），
+        // 破坏最后一个 box 的头部才能确定性地让容器解析失败。
+        let mut clobbered = bytes.clone();
+        let mut off = 0usize;
+        while off + 8 <= clobbered.len() {
+            let size = u32::from_be_bytes(clobbered[off..off + 4].try_into().unwrap()) as usize;
+            if size < 8 || off + size > clobbered.len() {
+                break;
+            }
+            if off + size == clobbered.len() {
+                clobbered[off..off + 8].fill(0xFF);
+                break;
+            }
+            off += size;
+        }
+        assert_ne!(clobbered, bytes, "sanity: last box header should be clobbered");
+        let clobbered_file = TempFile::with_extension("hive-avif-clobber", "avif");
+        clobbered_file.write_bytes(&clobbered);
+        assert!(decode_image(&avif_path(&clobbered_file)).is_err());
+    }
+
+    #[test]
+    fn image_dims_avif_returns_dimensions() {
+        let file = write_avif("hive-avif-dims", &solid_rgba(12, 8, [10, 20, 30, 255]));
+        let path = avif_path(&file);
+        let dims = tauri::async_runtime::block_on(image_dims(path.clone())).unwrap();
+        assert_eq!(dims, (12, 8));
+        // 编码器不写 irot/imir：容器方向为 None，回退 EXIF（默认 1，不交换宽高）
+        assert_eq!(avif_container_orientation(&path), None);
+        assert_eq!(read_orientation(&path), 1);
+    }
+
+    #[test]
+    fn avif_exif_orientation_covers_all_eight_codes() {
+        use mp4parse::{ImageMirror, ImageRotation};
+        // irot 逆时针：D90 = 顺时针 270° = EXIF 8
+        assert_eq!(avif_exif_orientation(ImageRotation::D0, None), 1u8);
+        assert_eq!(avif_exif_orientation(ImageRotation::D90, None), 8u8);
+        assert_eq!(avif_exif_orientation(ImageRotation::D180, None), 3u8);
+        assert_eq!(avif_exif_orientation(ImageRotation::D270, None), 6u8);
+        // 先旋转后镜像（MIAF §7.3.6.7）：TopBottom = 垂直镜像，LeftRight = 水平镜像
+        assert_eq!(avif_exif_orientation(ImageRotation::D0, Some(ImageMirror::TopBottom)), 4u8);
+        assert_eq!(avif_exif_orientation(ImageRotation::D90, Some(ImageMirror::TopBottom)), 5u8);
+        assert_eq!(avif_exif_orientation(ImageRotation::D180, Some(ImageMirror::TopBottom)), 2u8);
+        assert_eq!(avif_exif_orientation(ImageRotation::D270, Some(ImageMirror::TopBottom)), 7u8);
+        assert_eq!(avif_exif_orientation(ImageRotation::D0, Some(ImageMirror::LeftRight)), 2u8);
+        assert_eq!(avif_exif_orientation(ImageRotation::D90, Some(ImageMirror::LeftRight)), 7u8);
+        assert_eq!(avif_exif_orientation(ImageRotation::D180, Some(ImageMirror::LeftRight)), 4u8);
+        assert_eq!(avif_exif_orientation(ImageRotation::D270, Some(ImageMirror::LeftRight)), 5u8);
     }
 }
 
@@ -412,6 +642,10 @@ async fn image_dims(path: String) -> Result<(u32, u32), String> {
             .map_err(|e| format!("识别图片格式失败: {}", e))?
             .into_dimensions()
             .map_err(|e| format!("读取图片尺寸失败: {}", e))?;
+        // AVIF 例外：image 的 AvifDecoder::new 会完整解一帧（没有头解析），所以对
+        // AVIF 而言 into_dimensions 是全量解码。mp4parse 只把 ispe 暴露成裸指针
+        // （spatial_extents_ptr）、字段私有、无安全访问器；owner 只允许 imir 处的一处
+        // unsafe，因此保留 into_dimensions（前端 sizeCache 缓存，每文件只量一次）。
         let orientation = read_orientation(&path);
         Ok(if matches!(orientation, 5..=8) { (h, w) } else { (w, h) })
     })
@@ -442,8 +676,90 @@ struct PreviewResult {
     height: u32,
 }
 
-/// 读取 EXIF Orientation（1=正常）
+/// 文件头是否是 AVIF/AVIS 容器（ftyp box + avif/avis 品牌）。
+/// 只读前 64 字节，避免把 JPEG/PNG 等丢给 mp4parse。
+fn looks_like_avif(path: &str) -> bool {
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 64];
+    // read_exact：单次 read 可能短读；AVIF 必然长于 64 字节，读不满直接判否
+    if file.read_exact(&mut head).is_err() {
+        return false;
+    }
+    &head[4..8] == b"ftyp" && head[8..].windows(4).any(|w| w == b"avif" || w == b"avis")
+}
+
+/// avis（AVIF 动画序列）的品牌：image 的格式嗅探只认 major brand `avif`，
+/// avis 会以「无法识别格式」失败；这里提前给出明确错误。
+fn is_animated_avif(path: &str) -> bool {
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 12];
+    file.read_exact(&mut head).is_ok() && &head[4..8] == b"ftyp" && &head[8..12] == b"avis"
+}
+
+/// 容器 irot/imir → EXIF Orientation 码（1~8）。
+/// MIAF §7.3.6.7 规定变换顺序为 clean aperture → rotation → mirror（先旋转后镜像）；
+/// irot 的 angle 是逆时针（HEIF §6.5.10），所以 D90 显示时等于顺时针 270° = EXIF 8。
+/// 组合表与 Chromium AVIF 解码器（avif_image_decoder.cc 的 kAxisAngleToOrientation）一致：
+///   无镜像   angle 0/1/2/3 → 1/8/3/6
+///   TopBottom（上下交换 = 垂直镜像）→ 4/5/2/7
+///   LeftRight（左右交换 = 水平镜像）→ 2/7/4/5
+fn avif_exif_orientation(
+    rotation: mp4parse::ImageRotation,
+    mirror: Option<mp4parse::ImageMirror>,
+) -> u8 {
+    let angle = match rotation {
+        mp4parse::ImageRotation::D0 => 0,
+        mp4parse::ImageRotation::D90 => 1,
+        mp4parse::ImageRotation::D180 => 2,
+        mp4parse::ImageRotation::D270 => 3,
+    };
+    match mirror {
+        None => [1u8, 8, 3, 6][angle],
+        Some(mp4parse::ImageMirror::TopBottom) => [4u8, 5, 2, 7][angle],
+        Some(mp4parse::ImageMirror::LeftRight) => [2u8, 7, 4, 5][angle],
+    }
+}
+
+/// AVIF 容器的方向变换 → EXIF Orientation 码；不是 AVIF、无变换或解析失败时返回 None，
+/// 由调用方回退到 EXIF（容器有变换时跳过 EXIF，避免双重旋转）。
+fn avif_container_orientation(path: &str) -> Option<u8> {
+    if !looks_like_avif(path) {
+        return None;
+    }
+    let mut file = fs::File::open(path).ok()?;
+    let ctx = mp4parse::read_avif(&mut file, mp4parse::ParseStrictness::Normal).ok()?;
+    let rotation = ctx.image_rotation().ok()?;
+    let mirror_ptr = ctx.image_mirror_ptr().ok()?;
+    // SAFETY: mp4parse 只提供裸指针访问器 image_mirror_ptr()，没有安全版本。
+    // 为什么不用安全解析：imir 必须按 primary item 的 ipma 关联解析，mp4parse 没有
+    // 暴露 item_properties/ipma 的安全访问器；裸扫 box 会在多 item 文件中错配属性，
+    // 因此只能用这个裸指针（owner 允许的最后一处妥协）。
+    // 指针指向 ctx 内部 item_properties 里的 ImageMirror；ctx 在本函数内一直存活，
+    // 拿到指针后没有再移动/可变借用 ctx，读取期间指针有效；null 已在下面排除。
+    // ImageMirror 是无字段枚举（无 Drop），ptr::read 的位拷贝副本有效，源对象仍由 ctx 持有。
+    let mirror = if mirror_ptr.is_null() {
+        None
+    } else {
+        Some(unsafe { std::ptr::read(mirror_ptr) })
+    };
+    if matches!(rotation, mp4parse::ImageRotation::D0) && mirror.is_none() {
+        return None; // 容器没有方向变换：交给 EXIF
+    }
+    Some(avif_exif_orientation(rotation, mirror))
+}
+
+/// 读取 EXIF Orientation（1=正常）。
+/// AVIF 优先用容器方向（irot/imir）：image 的 AVIF 解码器不应用容器变换，
+/// 而部分 AVIF 的 EXIF Orientation 为空，方向只能从容器读。
+/// 容器没有变换时回退到 kamadak-exif（与其它格式一致）。
 fn read_orientation(path: &str) -> u32 {
+    if let Some(orientation) = avif_container_orientation(path) {
+        return orientation as u32;
+    }
     fs::File::open(path)
         .ok()
         .and_then(|f| {
@@ -566,17 +882,25 @@ fn apply_resize(img: DynamicImage, o: &ConvertOptions) -> Result<DynamicImage, S
 
 /// 按文件内容嗅探格式解码，不信任扩展名：image::open 按扩展名选解码器，
 /// PNG 改名成 .jpg 会被丢给 JPEG 解码器直接失败（Chromium/image_dims 都按内容识别）。
-/// AVIF 例外：image 的 avif 特性只带编码器，解码要 avif-native（原生 dav1d，
-/// Windows 上还要 meson/ninja 工具链），这里刻意不启用 —— AVIF 只能浏览和输出。
+/// AVIF 也走这条路径：image 的 avif-native 特性 + vendor/dav1d-shim（纯 Rust re_rav1d）
+/// 提供解码器，Windows 上不需要 meson/ninja/NASM。grid/动画（avis）AVIF 仍不支持，
+/// 由 image/mp4parse 返回明确错误。
 fn decode_image(path: &str) -> Result<DynamicImage, String> {
+    if is_animated_avif(path) {
+        return Err("暂不支持动画 AVIF（avis），请先转换为静态图片".to_string());
+    }
     let reader = image::ImageReader::open(path)
         .map_err(|e| format!("打开图片失败: {}", e))?
         .with_guessed_format()
         .map_err(|e| format!("识别图片格式失败: {}", e))?;
-    if reader.format() == Some(image::ImageFormat::Avif) {
-        return Err("暂不支持 AVIF 输入解码，请先转换为其它格式".to_string());
-    }
-    reader.decode().map_err(|e| format!("解码图片失败: {}", e))
+    let is_avif = reader.format() == Some(image::ImageFormat::Avif);
+    reader.decode().map_err(|e| {
+        if is_avif {
+            format!("解码 AVIF 失败（可能是不支持的 grid 分块或动画 AVIF）: {}", e)
+        } else {
+            format!("解码图片失败: {}", e)
+        }
+    })
 }
 
 /// 解码 → 旋转 → 缩放/裁剪，转换与预览共用同一条管线
@@ -629,6 +953,68 @@ fn fresh_output_path(dir: &str, stem: &str, prefix: &str, ext: &str) -> PathBuf 
         }
     }
     first
+}
+
+/// convertSettings 允许被前端 patch 的字段（与 viewer.ts 的 ConvertSettings 一一对应）。
+const CONVERT_SETTING_KEYS: &[&str] = &[
+    "rotation", "resizeMode", "width", "height", "padColor", "format", "lossless", "quality",
+    "outMode", "customDir", "prefix",
+];
+
+/// 把增量 patch 合并进当前 convertSettings（纯函数，便于单测）：
+///  * 只认白名单字段，未知键报错（防手改文件/前端 bug 写坏设置）
+///  * width/height 允许 null（表示不限制）
+///  * quality 四舍五入并 clamp 到 1..=100
+///
+/// 非对象 patch 直接拒绝；current 不是对象时按空对象处理（旧文件/脏数据容错）。
+fn merge_convert_patch(
+    current: &serde_json::Value,
+    patch: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let patch_obj = patch
+        .as_object()
+        .ok_or_else(|| "patch 必须是 JSON 对象".to_string())?;
+    let mut merged = current.as_object().cloned().unwrap_or_default();
+    for (key, value) in patch_obj {
+        if !CONVERT_SETTING_KEYS.contains(&key.as_str()) {
+            return Err(format!("未知的转换设置字段: {}", key));
+        }
+        let value = if key == "quality" {
+            let q = value
+                .as_f64()
+                .ok_or_else(|| "quality 必须是数字".to_string())?;
+            serde_json::json!(q.round().clamp(1.0, 100.0) as u8)
+        } else {
+            value.clone()
+        };
+        merged.insert(key.clone(), value);
+    }
+    Ok(serde_json::Value::Object(merged))
+}
+
+/// 原子更新共享的 convert-settings.json：读当前 convertSettings → 合并 patch → set + save，
+/// 返回合并结果。这是 convertSettings 的唯一写入口（前端不再整对象 set），
+/// 两个窗口并发改不同字段不会互相覆盖；同字段仍为 last-writer-wins。
+#[tauri::command(async)]
+fn update_convert_settings(
+    app: AppHandle,
+    patch: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let _guard = CONVERT_SETTINGS_LOCK
+        .lock()
+        .map_err(|_| "转换设置锁失败".to_string())?;
+    let store = app
+        .store("convert-settings.json")
+        .map_err(|e| format!("打开转换设置存储失败: {}", e))?;
+    let current = store
+        .get("convertSettings")
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    let merged = merge_convert_patch(&current, &patch)?;
+    store.set("convertSettings", merged.clone());
+    store
+        .save()
+        .map_err(|e| format!("保存转换设置失败: {}", e))?;
+    Ok(merged)
 }
 
 #[tauri::command]
@@ -1119,6 +1505,7 @@ pub fn run() {
             take_pending_convert,
             read_exif,
             image_dims,
+            update_convert_settings,
             convert_image,
             preview_convert,
             pick_folder,
@@ -1131,3 +1518,4 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
