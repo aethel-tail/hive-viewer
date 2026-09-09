@@ -19,10 +19,12 @@ interface Layer {
   size: Size | null; // img A 的原始尺寸（单页缩放用）
   need: number; // 需等待的 img 数
   got: number;
+  panX: number; // 屏幕坐标平移（拖动查看放大后的图片）
+  panY: number;
 }
 
 function emptyLayer(): Layer {
-  return { uri: "", uri2: "", group: [], size: null, need: 0, got: 0 };
+  return { uri: "", uri2: "", group: [], size: null, need: 0, got: 0, panX: 0, panY: 0 };
 }
 
 const store = useViewerStore();
@@ -55,6 +57,9 @@ watch(
     L.size = (headPath ? store.sizeCache[headPath] : undefined) ?? null;
     L.need = uri2 ? 2 : 1;
     L.got = 0;
+    // 每层独立平移：新图从居中开始，旧图翻到 back 后保留原视角（随即被清空）
+    L.panX = 0;
+    L.panY = 0;
   },
 );
 
@@ -88,6 +93,7 @@ function onLayerImgDone(idx: number, which: 0 | 1, e: Event) {
 }
 
 function flipTo(idx: number) {
+  stopPan(); // 拖拽中翻页：结束旧图拖拽，新图从居中开始
   activeIdx.value = idx;
   if (store.slideshowActive && store.slideshowEffect !== "none") {
     effectLayer.value = idx; // 动画结束后再清 back（见 onEffectEnd）
@@ -173,6 +179,136 @@ function layerSingleScale(L: Layer): number {
   return Math.min(1, cw / iw, ch / ih);
 }
 
+// ---- 拖动平移 ----
+// 平移作用在 .stage 的屏幕坐标上（transform: translate(...) rotate(...)），
+// 拖动方向始终跟随鼠标、与显示旋转无关；边界按旋转后的可视包围盒计算：
+// 放大后可以拖到任意边缘，缩到小于窗口时自动回中。
+const isPanning = ref(false);
+let panPointerId: number | null = null;
+let lastPointerX = 0;
+let lastPointerY = 0;
+
+// 图片当前的实际可视尺寸（含缩放；双页为整组的排版尺寸）
+function layerVisualSize(L: Layer): Size | null {
+  if (L.uri2) {
+    const d = dualLayoutFor(L);
+    return d ? { w: d.w0 + d.w1, h: d.H } : null;
+  }
+  if (!L.size) {
+    return null;
+  }
+  const s = layerSingleScale(L);
+  return { w: L.size.w * s, h: L.size.h * s };
+}
+
+// 允许的平移范围：图片边缘最多贴到窗口边缘，不允许拖出黑边（图片比窗口小时锁死居中）
+function panBounds(L: Layer): { x: number; y: number } {
+  const vs = layerVisualSize(L);
+  const cs = containerSize.value;
+  if (!vs || !cs) {
+    return { x: 0, y: 0 };
+  }
+  const oddTurn = Math.abs(Math.round(rotation.value / 90)) % 2 === 1;
+  const bw = oddTurn ? vs.h : vs.w;
+  const bh = oddTurn ? vs.w : vs.h;
+  return {
+    x: Math.max(0, (bw - cs.w) / 2),
+    y: Math.max(0, (bh - cs.h) / 2),
+  };
+}
+
+function clampPan(L: Layer) {
+  const b = panBounds(L);
+  L.panX = Math.min(b.x, Math.max(-b.x, L.panX));
+  L.panY = Math.min(b.y, Math.max(-b.y, L.panY));
+}
+
+const canPan = computed(() => {
+  const b = panBounds(activeLayer.value);
+  return b.x > 0.5 || b.y > 0.5;
+});
+
+// 缩放/旋转/容器尺寸/换图变化后，旧平移量可能超出新边界 → 立即回夹
+watch(
+  () =>
+    [
+      containerSize.value,
+      rotation.value,
+      store.zoomMode,
+      store.customZoom,
+      layers[0].size,
+      layers[1].size,
+      layers[0].group,
+      layers[1].group,
+    ] as const,
+  () => {
+    for (const L of layers) {
+      clampPan(L);
+    }
+  },
+);
+
+function stageTransform(L: Layer) {
+  return { transform: `translate(${L.panX}px, ${L.panY}px) rotate(${rotation.value}deg)` };
+}
+
+function onPointerDown(e: PointerEvent) {
+  if (!e.isPrimary || e.button !== 0 || !canPan.value) {
+    return;
+  }
+  e.preventDefault();
+  panPointerId = e.pointerId;
+  lastPointerX = e.clientX;
+  lastPointerY = e.clientY;
+  isPanning.value = true;
+  viewerEl.value?.setPointerCapture(e.pointerId);
+}
+
+function onPointerMove(e: PointerEvent) {
+  if (!isPanning.value || e.pointerId !== panPointerId) {
+    return;
+  }
+  const L = activeLayer.value;
+  L.panX += e.clientX - lastPointerX;
+  L.panY += e.clientY - lastPointerY;
+  lastPointerX = e.clientX;
+  lastPointerY = e.clientY;
+  clampPan(L);
+}
+
+function stopPan() {
+  const id = panPointerId;
+  panPointerId = null;
+  isPanning.value = false;
+  if (id !== null && viewerEl.value?.hasPointerCapture(id)) {
+    viewerEl.value.releasePointerCapture(id);
+  }
+}
+
+function endPan(e: PointerEvent) {
+  if (e.pointerId !== panPointerId) {
+    return;
+  }
+  stopPan();
+}
+
+// 旋转时把平移向量一起旋转，保持当前观察的图片区域仍在视野中央
+function rotatePan(deg: 90 | -90) {
+  const L = activeLayer.value;
+  if (!L.uri) {
+    return;
+  }
+  const { panX, panY } = L;
+  if (deg === 90) {
+    L.panX = -panY;
+    L.panY = panX;
+  } else {
+    L.panX = panY;
+    L.panY = -panX;
+  }
+  clampPan(L);
+}
+
 // 当前有效缩放（displayZoom 与缩放按钮用）：双页对取整体缩放，单页取自身缩放
 const effectiveScale = computed(() => {
   const L = activeLayer.value;
@@ -206,10 +342,12 @@ onMounted(() => {
   if (viewerEl.value) {
     resizeObs.observe(viewerEl.value);
   }
+  window.addEventListener("blur", stopPan);
 });
 
 onUnmounted(() => {
   resizeObs?.disconnect();
+  window.removeEventListener("blur", stopPan);
 });
 
 function zoomIn() {
@@ -242,10 +380,12 @@ function zoomOut() {
 
 function rotateClockwise() {
   rotation.value += 90;
+  rotatePan(90);
 }
 
 function rotateCounterClockwise() {
   rotation.value -= 90;
+  rotatePan(-90);
 }
 
 function onWheel(e: WheelEvent) {
@@ -293,8 +433,14 @@ defineExpose({
   <div
     ref="viewerEl"
     class="viewer-layer"
+    :class="{ 'can-pan': canPan, panning: isPanning }"
     :style="{ '--rot': rotation + 'deg' }"
     @wheel.prevent="onWheel"
+    @pointerdown="onPointerDown"
+    @pointermove="onPointerMove"
+    @pointerup="endPan"
+    @pointercancel="endPan"
+    @lostpointercapture="endPan"
   >
     <!-- 双层交叉缓冲：front 覆盖 back；back 加载完成即翻转为 front -->
     <div
@@ -307,6 +453,7 @@ defineExpose({
         { rtl: store.isRtl, front: i === activeIdx, back: i !== activeIdx },
         i === effectLayer ? effectClasses : {},
       ]"
+      :style="stageTransform(L)"
       @animationend="i === effectLayer && onEffectEnd()"
     >
       <!-- 双页：两张竖图并排；RTL 时第一张在右 -->
@@ -377,8 +524,23 @@ defineExpose({
   inset: 0;
   z-index: 0;
   overflow: hidden;
+  touch-action: none;
   background: var(--bg);
   perspective: 1200px;
+}
+
+/* 可拖动时给出抓手光标；拖动中禁用 stage 的 transform 过渡，保证跟手 */
+
+.viewer-layer.can-pan {
+  cursor: grab;
+}
+
+.viewer-layer.panning {
+  cursor: grabbing;
+}
+
+.viewer-layer.panning .stage {
+  transition: none;
 }
 
 .viewer-layer img {
@@ -406,7 +568,7 @@ defineExpose({
   display: flex;
   align-items: center;
   justify-content: center;
-  transform: rotate(var(--rot, 0deg));
+  /* transform 由 stageTransform(L) 内联提供：translate(pan) rotate(rot) */
   transform-origin: center center;
   transition: transform 300ms ease-out;
   will-change: transform;
