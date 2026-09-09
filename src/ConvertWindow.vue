@@ -109,9 +109,10 @@ onMounted(async () => {
   window.addEventListener("contextmenu", onContextMenu);
   window.addEventListener("keydown", onKeydown);
 
-  // 原生标题栏 X / Alt+F4 也走确认：同步 preventDefault，再异步确认后主动关闭
+  // 原生标题栏 X / Alt+F4：只有转换进行中才拦截并确认；空闲时直接放行，
+  // 否则“先 preventDefault 再程序化 close”的二次关闭会被永久拦下。
   unlistenClose = await getCurrentWebviewWindow().onCloseRequested((event) => {
-    if (closing) {
+    if (closing || !store.convertBusy) {
       return;
     }
     event.preventDefault();
