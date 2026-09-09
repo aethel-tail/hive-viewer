@@ -1275,8 +1275,29 @@ fn is_owned_convert_list(path: &Path) -> bool {
     in_temp && name.starts_with("hive-convert-") && name.ends_with(".txt")
 }
 
+/// 主窗口的记忆状态：普通窗口化 / 最大化 / 全屏。
+/// 普通窗口化不记忆位置，下次启动居中打开。
+#[derive(Clone, Copy)]
+enum MainWindowState {
+    Normal,
+    Maximized,
+    Fullscreen,
+}
+
+impl MainWindowState {
+    /// settings.json 里 mainWindowState 的取值。
+    fn as_str(self) -> &'static str {
+        match self {
+            MainWindowState::Normal => "normal",
+            MainWindowState::Maximized => "maximized",
+            MainWindowState::Fullscreen => "fullscreen",
+        }
+    }
+}
+
 /// 主窗口按需创建：tauri.conf.json 里 main 设了 create:false，
 /// 启动、收到新文件、转换窗口独活时被唤起，都走这里。
+/// 建窗时恢复上次的窗口状态（见 MainWindowState），避免「先窗口化、再跳全屏」的启动闪烁。
 fn create_main_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     let config = app
         .config()
@@ -1285,7 +1306,63 @@ fn create_main_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
         .iter()
         .find(|w| w.label == "main")
         .expect("tauri.conf.json 缺少 main 窗口配置");
-    WebviewWindowBuilder::from_config(app, config)?.build()
+    let builder = WebviewWindowBuilder::from_config(app, config)?;
+    let builder = match last_main_window_state(app) {
+        MainWindowState::Fullscreen => builder.fullscreen(true),
+        MainWindowState::Maximized => builder.maximized(true),
+        MainWindowState::Normal => builder.center(),
+    };
+    let window = builder.build()?;
+    // 记忆窗口状态：最大化 / 还原 / 全屏切换都会触发 Resized。
+    // 最小化时 is_maximized 不可信（tao 按 WM_SIZE 的 SIZE_MINIMIZED 清标志），跳过。
+    let handle = app.clone();
+    window.on_window_event(move |event| {
+        if !matches!(event, tauri::WindowEvent::Resized(_)) {
+            return;
+        }
+        let Some(win) = handle.get_webview_window("main") else {
+            return;
+        };
+        if win.is_minimized().unwrap_or(false) {
+            return;
+        }
+        let state = if win.is_fullscreen().unwrap_or(false) {
+            MainWindowState::Fullscreen
+        } else if win.is_maximized().unwrap_or(false) {
+            MainWindowState::Maximized
+        } else {
+            MainWindowState::Normal
+        };
+        persist_main_window_state(&handle, state);
+    });
+    Ok(window)
+}
+
+/// 读取上次退出时的主窗口状态（键缺失 / 非法值都按普通窗口化处理）。
+fn last_main_window_state(app: &AppHandle) -> MainWindowState {
+    let Ok(store) = app.store("settings.json") else {
+        return MainWindowState::Normal;
+    };
+    let raw = store.get("mainWindowState");
+    match raw.as_ref().and_then(|value| value.as_str()) {
+        Some("fullscreen") => MainWindowState::Fullscreen,
+        Some("maximized") => MainWindowState::Maximized,
+        _ => MainWindowState::Normal,
+    }
+}
+
+/// 把窗口状态写入 settings.json；值没变就跳过，避免拖动缩放时反复写盘。
+fn persist_main_window_state(app: &AppHandle, state: MainWindowState) {
+    let Ok(store) = app.store("settings.json") else {
+        return;
+    };
+    if let Some(value) = store.get("mainWindowState") {
+        if value.as_str() == Some(state.as_str()) {
+            return;
+        }
+    }
+    store.set("mainWindowState", state.as_str());
+    let _ = store.save();
 }
 
 /// 显示主窗口（不存在则创建）；带路径时把文件交给它：
