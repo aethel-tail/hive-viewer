@@ -137,7 +137,8 @@ function dualLayoutFor(L: Layer) {
   }
   const a0 = s0.w / s0.h;
   const a1 = s1.w / s1.h;
-  const H = Math.min(cw / (a0 + a1), ch);
+  // 与单页 fit 同规则：只缩不放。上限取两页较小原生高度，页面比窗口小就按原生尺寸并排。
+  const H = Math.min(cw / (a0 + a1), ch, s0.h, s1.h);
   return { H, w0: H * a0, w1: H * a1, h0: s0.h, h1: s1.h };
 }
 
@@ -167,7 +168,9 @@ function layerSingleScale(L: Layer): number {
   if (store.zoomMode === "custom") {
     return store.customZoom / 100;
   }
-  return Math.min(cw / iw, ch / ih);
+  // fit（含双页模式下的封面/横图独占等单张组）：只缩不放。
+  // 图片大于窗口时等比缩到长宽都装得下；原生尺寸装得下时保持 100% 不放大。
+  return Math.min(1, cw / iw, ch / ih);
 }
 
 // 当前有效缩放（displayZoom 与缩放按钮用）：双页对取整体缩放，单页取自身缩放
