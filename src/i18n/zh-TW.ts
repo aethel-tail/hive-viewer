@@ -100,6 +100,10 @@ export const zhTW: Record<keyof typeof zhCN, string> = {
   "settings.general.endLoop": "跳至第一個檔案",
   "settings.general.endNone": "無操作",
   "settings.general.endAsk": "詢問",
+  "settings.general.autoCheckUpdates": "自動取得更新",
+  "settings.general.autoCheckUpdatesHint":
+    "啟動時在背景下靜默檢查 GitHub Release，發現新版本會輕提示，點擊提示即可開啟下載頁。",
+  "settings.general.version": "版本",
 
   "settings.shortcuts.prev": "上一張圖片",
   "settings.shortcuts.next": "下一張圖片",
@@ -184,4 +188,5 @@ export const zhTW: Record<keyof typeof zhCN, string> = {
   "message.loopEnd": "已是最後一張，是否回到開頭？",
   "message.loopStart": "已是第一張，是否跳到最後一張？",
   "drop.hint": "放開以開啟圖片",
+  "update.available": "發現新版本 {version}，點擊查看",
 };

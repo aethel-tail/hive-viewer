@@ -100,6 +100,10 @@ export const en: Record<keyof typeof zhCN, string> = {
   "settings.general.endLoop": "Go to first image",
   "settings.general.endNone": "Do nothing",
   "settings.general.endAsk": "Ask",
+  "settings.general.autoCheckUpdates": "Check for updates automatically",
+  "settings.general.autoCheckUpdatesHint":
+    "Checks GitHub Releases silently in the background at startup. When a new version exists a small notice appears — click it to open the download page.",
+  "settings.general.version": "Version",
 
   "settings.shortcuts.prev": "Previous image",
   "settings.shortcuts.next": "Next image",
@@ -185,4 +189,5 @@ export const en: Record<keyof typeof zhCN, string> = {
   "message.loopEnd": "Last image reached. Loop back to the start?",
   "message.loopStart": "First image reached. Jump to the last one?",
   "drop.hint": "Drop to open image",
+  "update.available": "New version {version} available — click to view",
 };

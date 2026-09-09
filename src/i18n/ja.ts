@@ -100,6 +100,10 @@ export const ja: Record<keyof typeof zhCN, string> = {
   "settings.general.endLoop": "最初の画像へ移動",
   "settings.general.endNone": "何もしない",
   "settings.general.endAsk": "確認する",
+  "settings.general.autoCheckUpdates": "更新を自動取得",
+  "settings.general.autoCheckUpdatesHint":
+    "起動時にバックグラウンドで GitHub Release を静かに確認します。新しいバージョンがあると通知が出て、クリックでダウンロードページを開きます。",
+  "settings.general.version": "バージョン",
 
   "settings.shortcuts.prev": "前の画像",
   "settings.shortcuts.next": "次の画像",
@@ -185,4 +189,5 @@ export const ja: Record<keyof typeof zhCN, string> = {
   "message.loopEnd": "最後の画像です。先頭に戻って再生しますか？",
   "message.loopStart": "最初の画像です。最後の画像に移動しますか？",
   "drop.hint": "ドロップして画像を開く",
+  "update.available": "新しいバージョン {version} があります。クリックで表示",
 };

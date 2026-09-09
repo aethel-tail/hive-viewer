@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { reactive, ref, computed, watch, onMounted, onUnmounted } from "vue";
+import { getVersion } from "@tauri-apps/api/app";
 import { useViewerStore, DEFAULT_GENERAL_SETTINGS, DEFAULT_SHORTCUTS } from "@/stores/viewer";
 import { t, type Locale, type MessageKey } from "@/i18n";
 import Checkbox from "@/components/Checkbox.vue";
@@ -52,6 +53,9 @@ watch(
 );
 
 const activeTab = ref("general");
+
+// 应用版本号（构建时写入，非硬编码）
+const appVersion = ref("");
 
 const TABS = ["general", "theme", "shortcuts", "context", "language"] as const;
 type TabId = (typeof TABS)[number];
@@ -143,6 +147,12 @@ function onRecordKeydown(e: KeyboardEvent) {
 
 onMounted(() => {
   document.addEventListener("keydown", onRecordKeydown, true);
+  // 内置版本号：直接读打包时的应用版本（tauri.conf.json / Cargo.toml）
+  getVersion()
+    .then((v) => {
+      appVersion.value = v;
+    })
+    .catch((e) => console.error("getVersion failed:", e));
 });
 
 onUnmounted(() => {
@@ -307,6 +317,15 @@ function confirm() {
             <div class="setting-row">
               <span class="setting-label">{{ t("settings.general.endReachAction") }}</span>
               <Select v-model="draft.endReachAction" :options="endReachOptions" />
+            </div>
+            <div class="setting-row">
+              <span class="setting-label">{{ t("settings.general.autoCheckUpdates") }}</span>
+              <Checkbox v-model="draft.autoCheckUpdates" />
+            </div>
+            <p class="setting-hint">{{ t("settings.general.autoCheckUpdatesHint") }}</p>
+            <div class="setting-row">
+              <span class="setting-label">{{ t("settings.general.version") }}</span>
+              <span class="setting-value">v{{ appVersion || "—" }}</span>
             </div>
           </section>
 
@@ -598,6 +617,18 @@ function confirm() {
 .setting-label {
   font-size: 0.86rem;
   color: var(--fg);
+}
+
+.setting-value {
+  font-size: 0.86rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-muted);
+}
+
+.setting-hint {
+  margin-top: 8px;
+  font-size: 0.76rem;
+  color: var(--fg-muted);
 }
 
 .sub-settings {

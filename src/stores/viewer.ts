@@ -40,6 +40,7 @@ export const DEFAULT_GENERAL_SETTINGS = {
   shellContextMenuOpen: true, // 右键菜单：打开图片
   shellContextMenuConvert: true, // 右键菜单：格式转换
   endReachAction: "loop" as EndReachAction, // 到达收尾图片时执行
+  autoCheckUpdates: false, // 自动获取更新：每次启动后台静默检查 GitHub Release（默认关闭）
   theme: "system" as Theme, // 主题：跟随系统（默认）/ 黑 / 白 / 配色方案
   fontFamily: "", // 全局字体：'' = 默认链（思源 → 苹果 → 雅黑兜底，见 global.css --font-default）
   language: "zh-CN" as Locale, // 界面语言：简中 / 繁中 / EN / 日
@@ -129,10 +130,17 @@ export const useViewerStore = defineStore("viewer", () => {
   const shortcuts = reactive({ ...DEFAULT_SHORTCUTS });
   const shortcutsEdited = ref(false);
 
-  // 轻提示（如缩放比例）
-  const toast = reactive({ text: "", seq: 0 });
-  function showToast(text: string) {
+  // 轻提示（如缩放比例）；带 action 时提示可点击（用于更新提示 → 打开 Release 页面）
+  const toast = reactive<{
+    text: string;
+    seq: number;
+    action: (() => void) | null;
+    duration: number;
+  }>({ text: "", seq: 0, action: null, duration: 1200 });
+  function showToast(text: string, opts?: { action?: () => void; duration?: number }) {
     toast.text = text;
+    toast.action = opts?.action ?? null;
+    toast.duration = opts?.duration ?? 1200;
     toast.seq++;
   }
 

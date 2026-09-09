@@ -731,6 +731,24 @@ async fn ask_confirm(
     .unwrap_or(false)
 }
 
+/// 用系统默认浏览器打开「最新 Release」页面（更新提示点击时调用）。
+/// URL 固定写死、不接受前端参数，因此没有命令注入面。
+#[tauri::command]
+fn open_release_page() -> Result<(), String> {
+    const URL: &str = "https://github.com/aethel-tail/hive-viewer/releases/latest";
+    let mut cmd = std::process::Command::new("cmd");
+    // start 的第一个参数是窗口标题，留空以免把 URL 当成标题
+    cmd.args(["/C", "start", "", URL]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("打开浏览器失败: {}", e))
+}
+
 /// 注册/注销 Windows 11 右键菜单 sparse 包。复用安装包里已有的 sparse-package.ps1，
 /// 避免在 Rust 里重写一遍证书信任 + Add-AppxPackage。
 /// 脚本需要管理员权限（证书要进 LocalMachine\TrustedPeople），未提权时它会自己弹 UAC
@@ -850,6 +868,7 @@ pub fn run() {
             delete_files,
             ask_confirm,
             set_shell_context_menu,
+            open_release_page,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

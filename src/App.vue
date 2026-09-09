@@ -6,6 +6,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useViewerStore } from "@/stores/viewer";
 import { t, locale } from "@/i18n";
 import { useGeneralSettingsEffects } from "@/composables/useGeneralSettingsEffects";
+import { checkForUpdates } from "@/update";
 import ImageViewer from "@/components/ImageViewer.vue";
 import TopToolbar from "@/components/TopToolbar.vue";
 import BottomFloatingBar from "@/components/BottomFloatingBar.vue";
@@ -38,6 +39,22 @@ const exifData = ref<Record<string, string>>({});
 const exifError = ref("");
 const settingsVisible = ref(false);
 const convertVisible = ref(false);
+
+// 自动获取更新（默认关闭）：设置加载完成或用户在设置里打开时，本会话只跑一次。
+// 后台静默执行，失败无感；有新版本才弹可点击的轻提示。
+let updateChecked = false;
+watch(
+  () => store.generalSettings.autoCheckUpdates,
+  (on) => {
+    if (!on || updateChecked) {
+      return;
+    }
+    updateChecked = true;
+    // 延后一点，让首屏加载先跑完（启动扫描目录时不要争网络/主线程）
+    setTimeout(() => void checkForUpdates(), 2500);
+  },
+  { immediate: true },
+);
 
 async function loadExif() {
   if (!store.currentFile) {
@@ -363,7 +380,13 @@ onUnmounted(() => {
         </div>
       </div>
     </Transition>
-    <Message v-if="store.toast.seq > 0" :key="store.toast.seq" :text="store.toast.text" />
+    <Message
+      v-if="store.toast.seq > 0"
+      :key="store.toast.seq"
+      :text="store.toast.text"
+      :action="store.toast.action"
+      :duration="store.toast.duration"
+    />
     <ExifPanel :data="exifData" :visible="store.exifPanelVisible" />
 
     <SettingsPanel :visible="settingsVisible" @close="settingsVisible = false" />

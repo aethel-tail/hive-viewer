@@ -75,6 +75,12 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <Message v-if="store.toast.seq > 0" :key="store.toast.seq" :text="store.toast.text" />
+  <Message
+    v-if="store.toast.seq > 0"
+    :key="store.toast.seq"
+    :text="store.toast.text"
+    :action="store.toast.action"
+    :duration="store.toast.duration"
+  />
   <ConvertDialog v-if="store.currentFile" standalone @close="closeWindow" />
 </template>

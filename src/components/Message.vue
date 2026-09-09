@@ -1,11 +1,31 @@
 <script setup lang="ts">
-defineProps<{
+import { ref } from "vue";
+
+const props = defineProps<{
   text: string;
+  // 带 action 时提示可点击（如「发现新版本」→ 打开 Release 页面）
+  action?: (() => void) | null;
+  duration?: number;
 }>();
+
+const gone = ref(false);
+
+function onClick() {
+  gone.value = true;
+  props.action?.();
+}
 </script>
 
 <template>
-  <div class="message">{{ text }}</div>
+  <div
+    v-if="!gone"
+    class="message"
+    :class="{ actionable: !!action }"
+    :style="{ animationDuration: `${duration ?? 1200}ms` }"
+    @click="onClick"
+  >
+    {{ text }}
+  </div>
 </template>
 
 <style scoped>
@@ -27,6 +47,17 @@ defineProps<{
   border-radius: 999px;
   box-shadow: var(--shadow-md);
   animation: msg-fade 1.2s ease-out forwards;
+}
+
+/* 可点击的提示：接住指针、悬停暂停淡出，让用户来得及点 */
+
+.message.actionable {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.message.actionable:hover {
+  animation-play-state: paused;
 }
 
 @keyframes msg-fade {

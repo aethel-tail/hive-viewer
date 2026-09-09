@@ -99,6 +99,10 @@ export const zhCN = {
   "settings.general.endLoop": "转到首个文件",
   "settings.general.endNone": "无操作",
   "settings.general.endAsk": "询问",
+  "settings.general.autoCheckUpdates": "自动获取更新",
+  "settings.general.autoCheckUpdatesHint":
+    "启动时在后台静默检查 GitHub Release，发现新版本会轻提示，点击提示即可打开下载页。",
+  "settings.general.version": "版本",
 
   "settings.shortcuts.prev": "上一张图片",
   "settings.shortcuts.next": "下一张图片",
@@ -183,4 +187,5 @@ export const zhCN = {
   "message.loopEnd": "已是最后一张，是否回到开头？",
   "message.loopStart": "已是第一张，是否跳到最后一张？",
   "drop.hint": "松开以打开图片",
+  "update.available": "发现新版本 {version}，点击查看",
 };
