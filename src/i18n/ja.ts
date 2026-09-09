@@ -174,6 +174,13 @@ export const ja: Record<keyof typeof zhCN, string> = {
   "convert.needDir": "出力フォルダーを選択してください",
   "convert.outputSize": "出力サイズ",
   "convert.loading": "プレビュー生成中…",
+  "convert.batchCount": "{n} 枚の画像を選択中",
+  "convert.batchNote": "選択した画像を同じ設定で順番に変換します。",
+  "convert.batchTitle": "{n} 枚の画像",
+  "convert.convertingProgress": "変換中 {done}/{total}…",
+  "convert.batchSaved": "{ok} 枚を変換しました",
+  "convert.batchSummary": "完了：成功 {ok} 枚、失敗 {fail} 枚",
+  "convert.batchFailedItem": "{name}: {msg}",
 
   "toolbar.delete": "削除",
 

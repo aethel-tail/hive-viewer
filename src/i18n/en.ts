@@ -174,6 +174,13 @@ export const en: Record<keyof typeof zhCN, string> = {
   "convert.needDir": "Choose an output folder",
   "convert.outputSize": "Output size",
   "convert.loading": "Generating preview…",
+  "convert.batchCount": "{n} images selected",
+  "convert.batchNote": "All selected images will be converted sequentially with these settings.",
+  "convert.batchTitle": "{n} images",
+  "convert.convertingProgress": "Converting {done}/{total}…",
+  "convert.batchSaved": "Converted {ok} image(s)",
+  "convert.batchSummary": "Done: {ok} succeeded, {fail} failed",
+  "convert.batchFailedItem": "{name}: {msg}",
 
   "toolbar.delete": "Delete",
 

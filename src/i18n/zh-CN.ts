@@ -172,6 +172,13 @@ export const zhCN = {
   "convert.needDir": "请选择输出文件夹",
   "convert.outputSize": "输出尺寸",
   "convert.loading": "预览生成中…",
+  "convert.batchCount": "已选择 {n} 张图片",
+  "convert.batchNote": "将使用同一组设置依次转换。",
+  "convert.batchTitle": "{n} 张图片",
+  "convert.convertingProgress": "转换中 {done}/{total}…",
+  "convert.batchSaved": "成功转换 {ok} 张",
+  "convert.batchSummary": "转换完成：成功 {ok} 张，失败 {fail} 张",
+  "convert.batchFailedItem": "{name}: {msg}",
 
   "toolbar.delete": "删除",
 

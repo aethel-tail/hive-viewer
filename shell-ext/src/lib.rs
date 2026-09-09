@@ -5,13 +5,18 @@
 //! "Hive Viewer" verb with two sub-commands:
 //!   打开       -> hive-viewer.exe <path>
 //!   格式转换   -> hive-viewer.exe --convert <path>
+//!                 多选时改为 --convert-list <临时列表文件>（每行一个路径），
+//!                 避免命令行过长；写临时文件失败则退回多个 --convert 参数。
 //! The exe lives next to this DLL; the app itself does the rest.
 
 use std::ffi::c_void;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// 与 src-tauri 的 IMAGE_EXTENSIONS 保持一致（ASCII 大小写不敏感）。
+const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp", "bmp", "avif"];
 
 use windows::core::*;
 use windows::Win32::Foundation::*;
@@ -225,8 +230,11 @@ impl IExplorerCommand_Impl for ConvertCommand_Impl {
     }
 
     fn Invoke(&self, items: Ref<'_, IShellItemArray>, _ctx: Ref<'_, IBindCtx>) -> Result<()> {
-        if let Some(path) = first_item_path(items)? {
-            launch(&["--convert".into(), path])?;
+        let paths = image_paths(items)?;
+        match paths.as_slice() {
+            [] => {}
+            [path] => launch(&["--convert".into(), path.clone()])?,
+            _ => launch_convert_batch(&paths)?,
         }
         Ok(())
     }
@@ -294,6 +302,54 @@ fn first_item_path(items: Ref<'_, IShellItemArray>) -> Result<Option<String>> {
         let path = item.GetDisplayName(SIGDN_FILESYSPATH)?;
         Ok(Some(pwstr_to_string(path)))
     }
+}
+
+/// Filesystem path 是否属于支持的图片扩展名。
+fn is_image_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|ext| IMAGE_EXTENSIONS.iter().any(|known| ext.eq_ignore_ascii_case(known)))
+        .unwrap_or(false)
+}
+
+/// 选中项里所有支持图片的文件系统路径（顺序与资源管理器一致）。
+/// 单个取不到路径的项直接跳过，不因此放弃整批。
+fn image_paths(items: Ref<'_, IShellItemArray>) -> Result<Vec<String>> {
+    let items = items.ok()?;
+    let mut paths = Vec::new();
+    unsafe {
+        for i in 0..items.GetCount()? {
+            let Ok(item) = items.GetItemAt(i) else { continue };
+            let Ok(raw) = item.GetDisplayName(SIGDN_FILESYSPATH) else { continue };
+            let path = pwstr_to_string(raw);
+            if is_image_path(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    Ok(paths)
+}
+
+/// 多选批量转换：路径写入临时列表文件后以 --convert-list 启动。
+/// Windows 文件名不含换行，因此每行一个路径是安全的；写盘失败时退回逐路径参数
+/// （命令行长度上限内仍可用，后端会自行过滤非图片项）。
+fn launch_convert_batch(paths: &[String]) -> Result<()> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let list = std::env::temp_dir().join(format!("hive-convert-{}-{}.txt", std::process::id(), nanos));
+    if std::fs::write(&list, paths.join("\n")).is_ok() {
+        let result = launch(&["--convert-list".into(), list.to_string_lossy().to_string()]);
+        if result.is_err() {
+            let _ = std::fs::remove_file(&list); // 启动失败：别把清单留在 temp
+        }
+        return result;
+    }
+    let mut args = vec!["--convert".to_string()];
+    args.extend(paths.iter().cloned());
+    launch(&args)
 }
 
 /// Launch `hive-viewer.exe` (next to this DLL) with the given arguments.

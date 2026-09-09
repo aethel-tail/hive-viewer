@@ -14,7 +14,8 @@ const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp", "bmp", 
 static INITIAL_FILE: Mutex<Option<String>> = Mutex::new(None);
 /// 转换窗口的待处理路径：创建/通知前先写入，前端挂载后 drain，
 /// 兜住「窗口已创建但 webview 尚未挂载监听」的竞态。
-static PENDING_CONVERT: Mutex<Option<String>> = Mutex::new(None);
+/// 多选批量转换时是整个路径列表。
+static PENDING_CONVERT: Mutex<Option<Vec<String>>> = Mutex::new(None);
 
 #[derive(Serialize, Clone)]
 struct ImageFile {
@@ -112,8 +113,12 @@ fn trim_leading_zeros(digits: &[u8]) -> &[u8] {
 
 #[cfg(test)]
 mod tests {
-    use super::natural_cmp;
+    use super::{convert_request, decode_image, is_owned_convert_list, natural_cmp, read_convert_list};
+    use image::{DynamicImage, ImageFormat};
     use std::cmp::Ordering;
+    use std::io::Cursor;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
     #[test]
     fn natural_cmp_orders_numbers_numerically() {
@@ -127,6 +132,139 @@ mod tests {
         assert_eq!(natural_cmp("IMG2.png", "img10.png"), Ordering::Less);
         assert_eq!(natural_cmp("a1", "a1b"), Ordering::Less);
         assert_eq!(natural_cmp("第2页.png", "第10页.png"), Ordering::Less);
+    }
+
+    // ---- CLI 转换参数解析（--convert / --convert-list） ----
+
+    static UNIQUE: AtomicU32 = AtomicU32::new(0);
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// 临时目录下的唯一文件，Drop 时清理（断言失败也不留垃圾）。
+    struct TempFile(PathBuf);
+
+    impl TempFile {
+        /// 保留调用方给的前缀/后缀，仅插入进程内唯一片段，便于测试清理守卫。
+        fn new(name: &str) -> Self {
+            let seq = UNIQUE.fetch_add(1, AtomicOrdering::Relaxed);
+            let unique = format!("{}-{}", std::process::id(), seq);
+            let file_name = match name.strip_suffix(".txt") {
+                Some(stem) => format!("{}-{}.txt", stem, unique),
+                None => format!("{}-{}", name, unique),
+            };
+            Self(std::env::temp_dir().join(file_name))
+        }
+
+        /// 与 `new` 相同，但把唯一片段插在扩展名之前（扩展名有语义时用，如 `.jpg`）。
+        fn with_extension(stem: &str, ext: &str) -> Self {
+            let seq = UNIQUE.fetch_add(1, AtomicOrdering::Relaxed);
+            let unique = format!("{}-{}", std::process::id(), seq);
+            Self(std::env::temp_dir().join(format!("{}-{}.{}", stem, unique, ext)))
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+
+        fn write(&self, text: &str) {
+            std::fs::write(&self.0, text).unwrap();
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn convert_request_keeps_only_images() {
+        assert_eq!(
+            convert_request(&argv(&["app.exe", "--convert", "a.JPG"])),
+            Some(vec!["a.JPG".to_string()])
+        );
+        assert_eq!(
+            convert_request(&argv(&["app.exe", "--convert", "a.png", "b.txt", "c.webp"])),
+            Some(vec!["a.png".to_string(), "c.webp".to_string()])
+        );
+        assert_eq!(convert_request(&argv(&["app.exe", "--convert", "a.txt"])), None);
+        assert_eq!(convert_request(&argv(&["app.exe", "--convert"])), None);
+        assert_eq!(convert_request(&argv(&["app.exe", "--convert-list"])), None);
+        assert_eq!(convert_request(&argv(&["app.exe", "a.png"])), None);
+        assert_eq!(convert_request(&argv(&[])), None);
+    }
+
+    #[test]
+    fn convert_request_parses_list_file_and_filters() {
+        let file = TempFile::new("hive-convert-list.txt");
+        file.write("C:\\imgs\\a.jpg\r\n\r\nC:\\imgs\\b.txt\nC:\\imgs\\c.avif\n");
+        let arg = file.path().to_string_lossy().to_string();
+        assert_eq!(
+            convert_request(&argv(&["app.exe", "--convert-list", &arg])),
+            Some(vec!["C:\\imgs\\a.jpg".to_string(), "C:\\imgs\\c.avif".to_string()])
+        );
+        // 先读后删：自有列表文件用完即清
+        assert!(!file.path().exists());
+    }
+
+    #[test]
+    fn convert_request_missing_list_file_is_none() {
+        let file = TempFile::new("hive-convert-missing.txt");
+        let arg = file.path().to_string_lossy().to_string();
+        assert_eq!(convert_request(&argv(&["app.exe", "--convert-list", &arg])), None);
+    }
+
+    #[test]
+    fn convert_list_cleanup_is_guarded() {
+        // 自有临时列表文件：读后删除
+        let owned = TempFile::new("hive-convert-owned.txt");
+        owned.write("C:\\imgs\\a.jpg\n");
+        assert_eq!(read_convert_list(&owned.path().to_string_lossy()).len(), 1);
+        assert!(!owned.path().exists(), "owned temp list should be deleted");
+
+        // 同目录但前缀不符：绝不删除，但内容照常解析
+        let foreign = TempFile::new("hive-other.txt");
+        foreign.write("C:\\imgs\\a.jpg\n");
+        assert_eq!(
+            read_convert_list(&foreign.path().to_string_lossy()),
+            vec!["C:\\imgs\\a.jpg".to_string()]
+        );
+        assert!(foreign.path().exists(), "non-hive-convert temp file must survive");
+
+        // 前缀相符但不在临时目录根下（此处为临时目录的子目录）：绝不删除，但内容照常解析
+        let seq = UNIQUE.fetch_add(1, AtomicOrdering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("hive-test-dir-{}-{}", std::process::id(), seq));
+        std::fs::create_dir_all(&dir).unwrap();
+        let nested = dir.join("hive-convert-nested.txt");
+        std::fs::write(&nested, "C:\\imgs\\a.jpg\n").unwrap();
+        assert_eq!(
+            read_convert_list(&nested.to_string_lossy()),
+            vec!["C:\\imgs\\a.jpg".to_string()]
+        );
+        assert!(nested.exists(), "same-prefix file outside temp dir root must survive");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // 谓词本身：任意非临时目录路径都不算自有文件
+        assert!(!is_owned_convert_list(Path::new("D:\\some\\dir\\hive-convert-x.txt")));
+    }
+
+    // ---- 解码按内容嗅探（扩展名不可信） ----
+
+    #[test]
+    fn decode_image_sniffs_content_not_extension() {
+        // PNG 数据 + .jpg 扩展名：扩展名撒谎时也要能解码
+        let file = TempFile::with_extension("hive-misnamed", "jpg");
+        let mut png = Cursor::new(Vec::new());
+        DynamicImage::new_rgb8(3, 2).write_to(&mut png, ImageFormat::Png).unwrap();
+        std::fs::write(file.path(), png.get_ref()).unwrap();
+
+        // image::open 按扩展名选解码器：PNG 数据喂给 JPEG 解码器必然失败
+        assert!(image::open(file.path()).is_err(), "extension-based open must fail");
+
+        let img = decode_image(&file.path().to_string_lossy()).unwrap();
+        assert_eq!((img.width(), img.height()), (3, 2));
     }
 }
 
@@ -189,7 +327,7 @@ fn get_initial_file() -> Option<String> {
 
 /// 取出待处理的转换路径（取出即清空），供转换窗口挂载时兜底。
 #[tauri::command]
-fn take_pending_convert() -> Option<String> {
+fn take_pending_convert() -> Option<Vec<String>> {
     PENDING_CONVERT.lock().ok().and_then(|mut g| g.take())
 }
 
@@ -394,9 +532,20 @@ fn apply_resize(img: DynamicImage, o: &ConvertOptions) -> Result<DynamicImage, S
     }
 }
 
+/// 按文件内容嗅探格式解码，不信任扩展名：image::open 按扩展名选解码器，
+/// PNG 改名成 .jpg 会被丢给 JPEG 解码器直接失败（Chromium/image_dims 都按内容识别）。
+fn decode_image(path: &str) -> Result<DynamicImage, String> {
+    image::ImageReader::open(path)
+        .map_err(|e| format!("打开图片失败: {}", e))?
+        .with_guessed_format()
+        .map_err(|e| format!("识别图片格式失败: {}", e))?
+        .decode()
+        .map_err(|e| format!("解码图片失败: {}", e))
+}
+
 /// 解码 → 旋转 → 缩放/裁剪，转换与预览共用同一条管线
 fn process_image(path: &str, o: &ConvertOptions) -> Result<DynamicImage, String> {
-    let img = image::open(path).map_err(|e| format!("打开图片失败: {}", e))?;
+    let img = decode_image(path)?;
     let img = match o.rotation.as_str() {
         "exif" => exif_rotate(img, path),
         "cw90" => img.rotate90(),
@@ -486,7 +635,7 @@ fn get_proxy(path: &str) -> Result<(u32, u32, u32, Arc<DynamicImage>), String> {
         guard.insert(0, entry);
         return Ok(res);
     }
-    let img = image::open(path).map_err(|e| format!("打开图片失败: {}", e))?;
+    let img = decode_image(path)?;
     let (src_w, src_h) = (img.width(), img.height());
     let orientation = read_orientation(path);
     let proxy = Arc::new(img.resize(1200, 1200, FilterType::Triangle));
@@ -641,6 +790,61 @@ fn is_image_file(path: &str) -> bool {
     has_image_extension(Path::new(path))
 }
 
+/// 解析转换类 CLI 参数：
+///   --convert <路径...>       一个或多个图片路径（资源管理器单选/命令行）
+///   --convert-list <文件>     右键菜单多选写入的临时列表文件，每行一个路径
+/// 过滤掉非图片项；没有任何有效路径时返回 None（调用方按普通启动处理）。
+fn convert_request(args: &[String]) -> Option<Vec<String>> {
+    match args.get(1).map(String::as_str) {
+        Some("--convert") => {
+            let paths: Vec<String> =
+                args[2..].iter().filter(|p| is_image_file(p)).cloned().collect();
+            (!paths.is_empty()).then_some(paths)
+        }
+        Some("--convert-list") => {
+            let paths = read_convert_list(args.get(2)?);
+            (!paths.is_empty()).then_some(paths)
+        }
+        _ => None,
+    }
+}
+
+/// 读取列表文件（每行一个路径）并做同样的图片过滤。
+/// 先读后删，且只删「我们自己写的」列表文件（见 is_owned_convert_list）——
+/// CLI 参数里的任意路径绝不删除，这是明确的安全边界。
+fn read_convert_list(file: &str) -> Vec<String> {
+    let path = PathBuf::from(file);
+    let Ok(text) = fs::read_to_string(&path) else {
+        // 读失败（被占用/半写）也要清掉我们自己的临时清单；foreign 路径绝不碰
+        if is_owned_convert_list(&path) {
+            let _ = fs::remove_file(&path);
+        }
+        return Vec::new();
+    };
+    if is_owned_convert_list(&path) {
+        let _ = fs::remove_file(&path); // best-effort：删不掉就留给系统临时目录清理
+    }
+    text.lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .filter(|line| !line.trim().is_empty())
+        .filter(|line| is_image_file(line))
+        .map(str::to_string)
+        .collect()
+}
+
+/// 是否是 shell-ext 写入的批量列表文件：位于系统临时目录、名字为 hive-convert-*.txt。
+/// 用 components 比较，避免 GetTempPath 尾部分隔符差异导致误判。
+fn is_owned_convert_list(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let in_temp = path
+        .parent()
+        .map(|p| p.components().eq(std::env::temp_dir().components()))
+        .unwrap_or(false);
+    in_temp && name.starts_with("hive-convert-") && name.ends_with(".txt")
+}
+
 /// 主窗口按需创建：tauri.conf.json 里 main 设了 create:false，
 /// 启动、收到新文件、转换窗口独活时被唤起，都走这里。
 fn create_main_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
@@ -675,14 +879,14 @@ fn open_main_window(app: &AppHandle, path: Option<String>) {
 }
 
 /// 打开（或复用）独立转换窗口；主窗口保持原样，不被唤出。
-/// 路径先写入 PENDING_CONVERT：窗口新建时前端挂载后自取，
+/// 路径列表先写入 PENDING_CONVERT：窗口新建时前端挂载后自取，
 /// 已存在时再补一个 convert-file 事件（事件早于监听时由 pending 兜底）。
-fn open_convert_window(app: &AppHandle, path: String) {
+fn open_convert_window(app: &AppHandle, paths: Vec<String>) {
     if let Ok(mut guard) = PENDING_CONVERT.lock() {
-        *guard = Some(path.clone());
+        *guard = Some(paths.clone());
     }
     if let Some(window) = app.get_webview_window("convert") {
-        let _ = app.emit_to("convert", "convert-file", path);
+        let _ = app.emit_to("convert", "convert-file", paths);
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
@@ -829,10 +1033,10 @@ pub fn run() {
     // 设置里开了「允许多个实例」就不注册 single-instance 插件，新实例可独立启动并自理 CLI 参数。
     if !allow_multiple_instances() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            // 第二实例只转发参数：--convert 进独立转换窗口，图片路径进主窗口（按需创建）。
-            // 转换请求不再唤出主窗口。
-            if argv.len() > 2 && argv[1] == "--convert" && is_image_file(&argv[2]) {
-                open_convert_window(app, argv[2].clone());
+            // 第二实例只转发参数：--convert / --convert-list 进独立转换窗口，
+            // 图片路径进主窗口（按需创建）。转换请求不再唤出主窗口。
+            if let Some(paths) = convert_request(&argv) {
+                open_convert_window(app, paths);
                 return;
             }
             open_main_window(app, argv.get(1).filter(|p| is_image_file(p)).cloned());
@@ -842,12 +1046,12 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
-            // CLI 参数分派：--convert 只开独立转换窗口（不创建主窗口）；
+            // CLI 参数分派：--convert / --convert-list 只开独立转换窗口（不创建主窗口）；
             // 图片路径交给主窗口。路径经 INITIAL_FILE / PENDING_CONVERT 传递，
             // 前端挂载后主动拉取（setup 阶段 webview 还没开始监听事件）。
             let args: Vec<String> = std::env::args().collect();
-            if args.len() > 2 && args[1] == "--convert" && is_image_file(&args[2]) {
-                open_convert_window(app.handle(), args[2].clone());
+            if let Some(paths) = convert_request(&args) {
+                open_convert_window(app.handle(), paths);
             } else {
                 open_main_window(app.handle(), args.get(1).filter(|f| is_image_file(f)).cloned());
             }

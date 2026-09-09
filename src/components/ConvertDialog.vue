@@ -1,15 +1,15 @@
 <script setup lang="ts">
-import { ref, computed, watch, onUnmounted } from "vue";
+import { ref, computed, watch, toRefs, onUnmounted } from "vue";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-import { useViewerStore } from "@/stores/viewer";
+import {
+  useViewerStore,
+  type ConvertFormat,
+  type ConvertResizeMode,
+  type ConvertRotation,
+} from "@/stores/viewer";
 import { t, type MessageKey } from "@/i18n";
 import Select from "@/components/Select.vue";
 import Checkbox from "@/components/Checkbox.vue";
-
-type Rotation = "exif" | "ccw90" | "cw90" | "rot180";
-type ResizeMode = "none" | "contain" | "fit-width" | "pad" | "crop" | "stretch";
-type Format = "avif" | "webp" | "jpg" | "png" | "bmp";
-type OutMode = "original" | "pictures" | "custom";
 
 interface PreviewResult {
   path: string;
@@ -22,35 +22,56 @@ const emit = defineEmits<{ close: [] }>();
 const props = defineProps<{ standalone?: boolean }>();
 const store = useViewerStore();
 
-const ROTATIONS: { value: Rotation; labelKey: MessageKey }[] = [
+const ROTATIONS: { value: ConvertRotation; labelKey: MessageKey }[] = [
   { value: "exif", labelKey: "convert.rotExif" },
   { value: "ccw90", labelKey: "convert.rotCcw" },
   { value: "cw90", labelKey: "convert.rotCw" },
   { value: "rot180", labelKey: "convert.rot180" },
 ];
 
-const rotation = ref<Rotation>("exif");
-const resizeMode = ref<ResizeMode>("none");
-const width = ref<number | null>(null);
-const height = ref<number | null>(null);
-const padColor = ref("#ffffff");
-const format = ref<Format>("avif");
-const lossless = ref(false);
-const quality = ref<string | number>(80);
-const outMode = ref<OutMode>("original");
-const customDir = ref("");
-const prefix = ref("hive_");
+// 转换设置持久化在 store.convertSettings（独立的 convert-settings.json，两窗口共享）
+const cs = store.convertSettings;
+const {
+  rotation,
+  resizeMode,
+  width,
+  height,
+  padColor,
+  format,
+  lossless,
+  outMode,
+  customDir,
+  prefix,
+} = toRefs(cs);
+
+// 品质在 store 里是 number，输入框用字符串代理：非法输入不落盘，payload 再兜底 clamp
+const quality = computed({
+  get: () => String(cs.quality),
+  set: (v: string) => {
+    const n = Math.round(Number(v));
+    if (Number.isFinite(n) && n >= 1 && n <= 100) {
+      cs.quality = n;
+    }
+  },
+});
 
 const busy = ref(false);
 const errorMsg = ref("");
-// standalone 下最近一次转换成功的输出路径（留在窗口里展示，由用户手动关闭）
+// standalone 下的结果展示：单张 = 输出路径；批量 = 全部成功时的摘要
 const savedPath = ref("");
+const batchSummary = ref("");
+const progress = ref({ done: 0, total: 0 });
 
-const file = computed(() => store.currentFile);
+// 批量队列优先；否则主窗口/独立窗口里的单张当前图。预览只画第一个目标。
+const targets = computed(() =>
+  store.convertQueue.length > 0 ? store.convertQueue : store.currentFile ? [store.currentFile] : [],
+);
+const isBatch = computed(() => targets.value.length > 1);
+const file = computed(() => targets.value[0]);
 const stem = computed(() => (file.value ? file.value.name.replace(/\.[^.]+$/, "") : ""));
 const filenamePreview = computed(() => `${prefix.value}${stem.value}.${format.value}`);
 
-const resizeOptions = computed<{ value: ResizeMode; label: string }[]>(() => [
+const resizeOptions = computed<{ value: ConvertResizeMode; label: string }[]>(() => [
   { value: "none", label: t("convert.resizeNone") },
   { value: "contain", label: t("convert.resizeContain") },
   { value: "fit-width", label: t("convert.resizeFitWidth") },
@@ -58,8 +79,8 @@ const resizeOptions = computed<{ value: ResizeMode; label: string }[]>(() => [
   { value: "crop", label: t("convert.resizeCrop") },
   { value: "stretch", label: t("convert.resizeStretch") },
 ]);
-const formatOptions = computed<{ value: Format; label: string }[]>(() =>
-  (["avif", "webp", "jpg", "png", "bmp"] as Format[]).map((v) => ({
+const formatOptions = computed<{ value: ConvertFormat; label: string }[]>(() =>
+  (["avif", "webp", "jpg", "png", "bmp"] as ConvertFormat[]).map((v) => ({
     value: v,
     label: v.toUpperCase(),
   })),
@@ -69,21 +90,31 @@ const qualityPresets = [100, 95, 90, 85, 80, 70, 60, 50];
 const needWidth = computed(() => resizeMode.value !== "none");
 const needHeight = computed(() => ["contain", "pad", "crop", "stretch"].includes(resizeMode.value));
 
-// 进入需要尺寸的模式时用原图尺寸预填
-watch(resizeMode, (m) => {
-  if (m === "none" || !file.value) {
-    return;
-  }
-  const s = store.sizeCache[file.value.path];
-  if (s && s.w > 0) {
-    if (!width.value) {
-      width.value = s.w;
+// 进入需要尺寸的模式时用第一个目标的原图尺寸预填（批量时取队首）；
+// 尺寸可能晚于对话框挂载到达（loadImage 是异步的），所以也监听 sizeCache 的那一项。
+watch(
+  [
+    resizeMode,
+    () => file.value?.path,
+    () => (file.value ? store.sizeCache[file.value.path] : undefined),
+  ],
+  () => {
+    const m = resizeMode.value;
+    if (m === "none" || !file.value) {
+      return;
     }
-    if (needHeight.value && !height.value) {
-      height.value = s.h;
+    const s = store.sizeCache[file.value.path];
+    if (s && s.w > 0) {
+      if (!width.value) {
+        width.value = s.w;
+      }
+      if (needHeight.value && !height.value) {
+        height.value = s.h;
+      }
     }
-  }
-});
+  },
+  { immediate: true },
+);
 
 // 无损：仅 webp 可选；png/bmp 恒无损；jpg/avif 不支持（ravif 无真无损）
 const losslessMeta = computed(() => {
@@ -153,7 +184,8 @@ async function refreshPreview() {
 }
 
 watch(
-  [rotation, resizeMode, width, height, padColor],
+  // 也监听首个目标的路径：复用转换窗口收到新一批路径时，预览要跟着换图
+  [rotation, resizeMode, width, height, padColor, () => file.value?.path],
   () => {
     if (timer !== null) {
       clearTimeout(timer);
@@ -187,6 +219,7 @@ async function doConvert() {
   }
   errorMsg.value = "";
   savedPath.value = "";
+  batchSummary.value = "";
   if (
     needWidth.value &&
     (!width.value || width.value < 1 || (needHeight.value && (!height.value || height.value < 1)))
@@ -194,30 +227,82 @@ async function doConvert() {
     errorMsg.value = t("convert.invalidSize");
     return;
   }
+  const list = targets.value;
+  if (list.length === 0) {
+    return;
+  }
+  // 快照：批量转换期间改设置不应影响正在跑的这一批（尤其 outMode 决定输出目录）
+  const opts = payload();
+  const outMode = cs.outMode;
+  const customDirPath = customDir.value;
+
   busy.value = true;
+  progress.value = { done: 0, total: list.length };
+  const failures: { name: string; msg: string }[] = [];
+  let ok = 0;
+  let lastSaved = "";
   try {
-    let dir = customDir.value;
-    if (outMode.value === "original") {
-      dir = file.value.path.replace(/[\\/][^\\/]*$/, "");
-    } else if (outMode.value === "pictures") {
-      dir = await invoke<string>("pictures_dir");
-    } else if (!dir) {
-      errorMsg.value = t("convert.needDir");
+    // 输出目录只解析一次：original 每张各自的目录，pictures/custom 共享
+    let sharedDir = "";
+    if (outMode === "pictures") {
+      sharedDir = await invoke<string>("pictures_dir");
+    } else if (outMode === "custom") {
+      if (!customDirPath) {
+        errorMsg.value = t("convert.needDir");
+        return;
+      }
+      sharedDir = customDirPath;
+    }
+
+    // 顺序转换，单张失败不中断整批
+    for (const item of list) {
+      try {
+        const dir = outMode === "original" ? item.path.replace(/[\\/][^\\/]*$/, "") : sharedDir;
+        const saved = await invoke<string>("convert_image", {
+          path: item.path,
+          options: opts,
+          outputDir: dir,
+        });
+        ok += 1;
+        lastSaved = saved;
+      } catch (e) {
+        failures.push({ name: item.name, msg: String(e) });
+      } finally {
+        progress.value = { done: progress.value.done + 1, total: list.length };
+      }
+    }
+
+    if (list.length === 1) {
+      // 单张：保持原有行为
+      if (failures.length > 0) {
+        errorMsg.value = failures[0].msg;
+        return;
+      }
+      store.showToast(t("convert.saved"));
+      if (props.standalone) {
+        // 独立转换窗口：留在原地展示成功结果，不自动关闭
+        savedPath.value = lastSaved;
+      } else {
+        emit("close");
+        // 刷新文件列表并跳到新图
+        store.openImageByPath(lastSaved);
+      }
       return;
     }
-    const saved = await invoke<string>("convert_image", {
-      path: file.value.path,
-      options: payload(),
-      outputDir: dir,
-    });
-    store.showToast(t("convert.saved"));
-    if (props.standalone) {
-      // 独立转换窗口：留在原地展示成功结果，不自动关闭
-      savedPath.value = saved;
+
+    // 批量：成功才进 success 框；有失败时汇总+失败明细走 error 区，避免 ✓ 与失败并存
+    const summary = t("convert.batchSummary", { ok, fail: failures.length });
+    if (failures.length === 0) {
+      store.showToast(t("convert.batchSaved", { ok }));
+      if (props.standalone) {
+        batchSummary.value = summary;
+      }
     } else {
-      emit("close");
-      // 刷新文件列表并跳到新图
-      store.openImageByPath(saved);
+      store.showToast(summary);
+      errorMsg.value = [
+        summary,
+        ...failures.map((f) => t("convert.batchFailedItem", { name: f.name, msg: f.msg })),
+      ].join("\n");
     }
   } catch (e) {
     errorMsg.value = String(e);
@@ -248,6 +333,11 @@ async function doConvert() {
 
       <div class="cd-body">
         <div class="cd-settings">
+          <div v-if="isBatch" class="cd-batch">
+            <span class="cd-batch-count">{{ t("convert.batchCount", { n: targets.length }) }}</span>
+            <span class="cd-note">{{ t("convert.batchNote") }}</span>
+          </div>
+
           <!-- 1. 旋转 -->
           <section class="cd-module">
             <h3>{{ t("convert.rotation") }}</h3>
@@ -342,15 +432,31 @@ async function doConvert() {
             </div>
           </section>
 
+          <div v-if="busy && isBatch" class="cd-progress">
+            {{ t("convert.convertingProgress", { done: progress.done, total: progress.total }) }}
+          </div>
+
           <div v-if="errorMsg" class="cd-error">{{ errorMsg }}</div>
 
           <div v-if="savedPath" class="cd-success">
             <span class="cd-success-label">✓ {{ t("convert.saved") }}</span>
             <span class="cd-success-path" :title="savedPath">{{ savedPath }}</span>
           </div>
+          <div v-else-if="batchSummary" class="cd-success">
+            <span class="cd-success-label">✓ {{ batchSummary }}</span>
+          </div>
 
           <button type="button" class="cd-start" :disabled="busy" @click="doConvert">
-            {{ busy ? t("convert.converting") : t("convert.start") }}
+            {{
+              busy
+                ? isBatch
+                  ? t("convert.convertingProgress", {
+                      done: progress.done,
+                      total: progress.total,
+                    })
+                  : t("convert.converting")
+                : t("convert.start")
+            }}
           </button>
         </div>
 
@@ -609,8 +715,26 @@ async function doConvert() {
   font-size: 0.8rem;
   color: var(--accent);
   word-break: break-all;
+  white-space: pre-line;
   background: var(--accent-soft);
   border-radius: var(--radius-sm);
+}
+
+.cd-batch {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cd-batch-count {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.cd-progress {
+  font-size: 0.8rem;
+  color: var(--accent);
 }
 
 .cd-success {

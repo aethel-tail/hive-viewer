@@ -173,6 +173,13 @@ export const zhTW: Record<keyof typeof zhCN, string> = {
   "convert.needDir": "請選擇輸出資料夾",
   "convert.outputSize": "輸出尺寸",
   "convert.loading": "預覽產生中…",
+  "convert.batchCount": "已選擇 {n} 張圖片",
+  "convert.batchNote": "將使用同一組設定依序轉換。",
+  "convert.batchTitle": "{n} 張圖片",
+  "convert.convertingProgress": "轉換中 {done}/{total}…",
+  "convert.batchSaved": "成功轉換 {ok} 張",
+  "convert.batchSummary": "轉換完成：成功 {ok} 張，失敗 {fail} 張",
+  "convert.batchFailedItem": "{name}: {msg}",
 
   "toolbar.delete": "刪除",
 

@@ -46,6 +46,26 @@ export const DEFAULT_GENERAL_SETTINGS = {
   language: "zh-CN" as Locale, // 界面语言：简中 / 繁中 / EN / 日
 };
 
+// 转换对话框设置的默认值（转换设置持久化在独立的 convert-settings.json）
+export type ConvertRotation = "exif" | "ccw90" | "cw90" | "rot180";
+export type ConvertResizeMode = "none" | "contain" | "fit-width" | "pad" | "crop" | "stretch";
+export type ConvertFormat = "avif" | "webp" | "jpg" | "png" | "bmp";
+export type ConvertOutMode = "original" | "pictures" | "custom";
+
+export const DEFAULT_CONVERT_SETTINGS = {
+  rotation: "exif" as ConvertRotation,
+  resizeMode: "none" as ConvertResizeMode,
+  width: null as number | null,
+  height: null as number | null,
+  padColor: "#ffffff",
+  format: "avif" as ConvertFormat,
+  lossless: false,
+  quality: 80,
+  outMode: "original" as ConvertOutMode,
+  customDir: "",
+  prefix: "hive_",
+};
+
 // 快捷键预设（小写 spec：修饰键 + 主键，如 'ctrl+r'、'arrowleft'；'digit' 表示 1~9 数字键）
 export const DEFAULT_SHORTCUTS = {
   prev: "arrowleft", // 上一张图片
@@ -129,6 +149,16 @@ export const useViewerStore = defineStore("viewer", () => {
   // 快捷键配置
   const shortcuts = reactive({ ...DEFAULT_SHORTCUTS });
   const shortcutsEdited = ref(false);
+
+  // 转换设置存在独立的 convert-settings.json：独立转换窗口把 settings.json 设为只读
+  //（setSettingsReadOnly）以避免与主窗口互相覆盖，但转换参数是它自己的数据，必须能
+  // 保存并在两个窗口之间共享，所以单开一个文件、只由转换对话框读写，不会互相 clobber。
+  const convertStore = new LazyStore("convert-settings.json");
+  const convertSettings = reactive({ ...DEFAULT_CONVERT_SETTINGS });
+  const convertSettingsEdited = ref(false);
+
+  // 批量转换队列（右键菜单多选 / --convert 多路径）；空 = 主窗口里的单张转换
+  const convertQueue = ref<ImageFile[]>([]);
 
   // 轻提示（如缩放比例）；带 action 时提示可点击（用于更新提示 → 打开 Release 页面）
   const toast = reactive<{
@@ -374,6 +404,22 @@ export const useViewerStore = defineStore("viewer", () => {
     } catch (e) {
       console.error("Open folder failed:", e);
     }
+  }
+
+  // 右键菜单多选 / --convert 多路径：以这批路径作为队列和当前文件列表，
+  // 转换对话框只显示第一张的预览，但会依次转换整批。
+  async function openConvertBatch(paths: string[]) {
+    const list = paths.map((p) => ({ name: p.split(/[\\/]/).pop() || p, path: p }));
+    if (list.length === 0) {
+      return;
+    }
+    convertQueue.value = list;
+    files.value = list;
+    currentIndex.value = 0;
+    groupIndices.value = [];
+    clearCaches();
+    zoomMode.value = "fit";
+    await loadImage(list[0].path);
   }
 
   function clearCaches() {
@@ -776,6 +822,65 @@ export const useViewerStore = defineStore("viewer", () => {
     }
   }
 
+  // 反序列化时只接受已知枚举值与合法数值，非法项回退默认值（防手改文件/旧版本脏数据）。
+  const CONVERT_ROTATIONS: ConvertRotation[] = ["exif", "ccw90", "cw90", "rot180"];
+  const CONVERT_RESIZE_MODES: ConvertResizeMode[] = [
+    "none",
+    "contain",
+    "fit-width",
+    "pad",
+    "crop",
+    "stretch",
+  ];
+  const CONVERT_FORMATS: ConvertFormat[] = ["avif", "webp", "jpg", "png", "bmp"];
+  const CONVERT_OUT_MODES: ConvertOutMode[] = ["original", "pictures", "custom"];
+
+  function oneOf<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+    return typeof value === "string" && (allowed as readonly string[]).includes(value)
+      ? (value as T)
+      : fallback;
+  }
+
+  function positiveOrNull(value: unknown): number | null {
+    return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+  }
+
+  function sanitizeConvertSettings(raw: unknown) {
+    const d = DEFAULT_CONVERT_SETTINGS;
+    const s = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+    convertSettings.rotation = oneOf(s.rotation, CONVERT_ROTATIONS, d.rotation);
+    convertSettings.resizeMode = oneOf(s.resizeMode, CONVERT_RESIZE_MODES, d.resizeMode);
+    convertSettings.width = positiveOrNull(s.width);
+    convertSettings.height = positiveOrNull(s.height);
+    convertSettings.padColor =
+      typeof s.padColor === "string" && /^#[0-9a-fA-F]{6}$/.test(s.padColor)
+        ? s.padColor
+        : d.padColor;
+    convertSettings.format = oneOf(s.format, CONVERT_FORMATS, d.format);
+    convertSettings.lossless = typeof s.lossless === "boolean" ? s.lossless : d.lossless;
+    convertSettings.quality =
+      typeof s.quality === "number" &&
+      Number.isFinite(s.quality) &&
+      s.quality >= 1 &&
+      s.quality <= 100
+        ? Math.round(s.quality)
+        : d.quality;
+    convertSettings.outMode = oneOf(s.outMode, CONVERT_OUT_MODES, d.outMode);
+    convertSettings.customDir = typeof s.customDir === "string" ? s.customDir : d.customDir;
+    convertSettings.prefix = typeof s.prefix === "string" ? s.prefix : d.prefix;
+  }
+
+  async function loadConvertSettings() {
+    try {
+      const raw = await convertStore.get("convertSettings");
+      if (!convertSettingsEdited.value) {
+        sanitizeConvertSettings(raw);
+      }
+    } catch (e) {
+      console.error("Failed to load convert settings:", e);
+    }
+  }
+
   // 只写变化的那一项（plugin-store 没有批量 set），再统一落盘
   async function saveSettings(keys: Record<string, unknown>) {
     if (settingsReadOnly) {
@@ -788,6 +893,17 @@ export const useViewerStore = defineStore("viewer", () => {
       await store.save();
     } catch (e) {
       console.error("Failed to save settings:", e);
+    }
+  }
+
+  // 不走 settingsReadOnly：独立转换窗口只读的是 settings.json，
+  // 转换设置是它自己的文件，两窗口都能写、也都需要持久化。
+  async function saveConvertSettings() {
+    try {
+      await convertStore.set("convertSettings", { ...convertSettings });
+      await convertStore.save();
+    } catch (e) {
+      console.error("Failed to save convert settings:", e);
     }
   }
 
@@ -840,11 +956,21 @@ export const useViewerStore = defineStore("viewer", () => {
     { deep: true },
   );
 
+  watch(
+    convertSettings,
+    () => {
+      convertSettingsEdited.value = true;
+      saveConvertSettings();
+    },
+    { deep: true },
+  );
+
   watch(files, () => {
     stopSlideshow();
   });
 
   loadSettings();
+  loadConvertSettings();
 
   return {
     files,
@@ -858,6 +984,8 @@ export const useViewerStore = defineStore("viewer", () => {
     topToolbarLocked,
     bottomFloatingBarLocked,
     exifPanelVisible,
+    convertSettings,
+    convertQueue,
     slideshowActive,
     slideshowInterval,
     slideshowOrder,
@@ -874,6 +1002,7 @@ export const useViewerStore = defineStore("viewer", () => {
     openFile,
     openFolder,
     openImageByPath,
+    openConvertBatch,
     goPrev,
     goNext,
     setZoomMode,

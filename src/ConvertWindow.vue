@@ -33,12 +33,13 @@ async function closeWindow() {
   }
 }
 
-// 窗口标题：转换格式 - 文件名（未取到路径时只显示标题）
+// 窗口标题：转换格式 - 文件名（多选时为张数，未取到路径时只显示标题）
 watch(
-  () => [store.currentFile, locale.value] as const,
+  () => [store.convertQueue.length, store.currentFile, locale.value] as const,
   async () => {
     try {
-      const name = store.currentFile?.name;
+      const count = store.convertQueue.length;
+      const name = count > 1 ? t("convert.batchTitle", { n: count }) : store.currentFile?.name;
       await getCurrentWebviewWindow().setTitle(
         name ? `${t("convert.title")} - ${name}` : t("convert.title"),
       );
@@ -53,17 +54,17 @@ onMounted(async () => {
   window.addEventListener("contextmenu", onContextMenu);
   window.addEventListener("keydown", onKeydown);
 
-  unlistenConvert = await listen<string>("convert-file", (event) => {
-    if (event.payload) {
-      store.openImageByPath(event.payload);
+  unlistenConvert = await listen<string[]>("convert-file", (event) => {
+    if (event.payload && event.payload.length > 0) {
+      store.openConvertBatch(event.payload);
     }
   });
 
   // 后端在创建/通知窗口前已把路径写入 pending；挂载时取一次，
   // 兜住「事件早于监听」的竞态。
-  const pending = await invoke<string | null>("take_pending_convert");
-  if (pending) {
-    await store.openImageByPath(pending);
+  const pending = await invoke<string[] | null>("take_pending_convert");
+  if (pending && pending.length > 0) {
+    await store.openConvertBatch(pending);
   }
 });
 
@@ -82,5 +83,9 @@ onUnmounted(() => {
     :action="store.toast.action"
     :duration="store.toast.duration"
   />
-  <ConvertDialog v-if="store.currentFile" standalone @close="closeWindow" />
+  <ConvertDialog
+    v-if="store.convertQueue.length > 0 || store.currentFile"
+    standalone
+    @close="closeWindow"
+  />
 </template>
