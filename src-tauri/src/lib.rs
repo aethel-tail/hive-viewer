@@ -1208,6 +1208,32 @@ fn pictures_dir(app: AppHandle) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+/// 快捷键「发送到 hive-viewer」：把图片复制到 <图片文件夹>\hive-viewer（不存在则创建）。
+/// 同名文件不覆盖，自动追加 _1、_2（与转换输出同一规则）；返回复制后的目标路径。
+#[tauri::command(async)]
+fn send_to_hive_folder(app: AppHandle, paths: Vec<String>) -> Result<Vec<String>, String> {
+    let dir = app
+        .path()
+        .picture_dir()
+        .map_err(|e| format!("无法定位图片文件夹: {}", e))?
+        .join("hive-viewer");
+    fs::create_dir_all(&dir).map_err(|e| format!("创建文件夹失败: {} ({})", dir.display(), e))?;
+    let dir_str = dir.to_string_lossy().to_string();
+    let mut copied = Vec::with_capacity(paths.len());
+    for p in &paths {
+        let src = Path::new(p);
+        let stem = src
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| format!("无效的文件名: {}", p))?;
+        let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let dst = fresh_output_path(&dir_str, stem, "", ext);
+        fs::copy(src, &dst).map_err(|e| format!("复制失败: {} ({})", p, e))?;
+        copied.push(dst.to_string_lossy().to_string());
+    }
+    Ok(copied)
+}
+
 fn is_image_file(path: &str) -> bool {
     has_image_extension(Path::new(path))
 }
@@ -1587,6 +1613,7 @@ pub fn run() {
             preview_convert,
             pick_folder,
             pictures_dir,
+            send_to_hive_folder,
             delete_files,
             ask_confirm,
             set_shell_context_menu,

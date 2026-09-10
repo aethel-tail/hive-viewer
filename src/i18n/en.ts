@@ -114,6 +114,7 @@ export const en: Record<keyof typeof zhCN, string> = {
   "settings.shortcuts.toggleExif": "Toggle EXIF panel",
   "settings.shortcuts.stopSlideshow": "Stop slideshow",
   "settings.shortcuts.slideshowSpeed": "Slideshow speed (1–9s)",
+  "settings.shortcuts.sendToHiveFolder": "Send to Pictures\\hive-viewer",
   "settings.shortcuts.recording": "Press new shortcut… (Esc to cancel)",
   "settings.shortcuts.conflict": 'Already used by "{name}"',
   "settings.shortcuts.hint":
@@ -199,6 +200,9 @@ export const en: Record<keyof typeof zhCN, string> = {
   "delete.confirm": 'Move "{name}" to the Recycle Bin?',
   "delete.ok": "Delete",
   "delete.done": "Moved to Recycle Bin",
+  "send.done": "Sent to the hive-viewer folder",
+  "send.doneMany": "Sent {n} images to the hive-viewer folder",
+  "send.failed": "Send failed: {msg}",
   "message.atEnd": "This is the last image",
   "message.atStart": "This is the first image",
   "message.noImages": "No images in this folder",

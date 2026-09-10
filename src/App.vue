@@ -267,6 +267,16 @@ function onKeydown(e: KeyboardEvent) {
     return;
   }
 
+  if (matchKey(e, sc.sendToHiveFolder)) {
+    // 对话框/设置面板打开时忽略，避免录制快捷键时误触发
+    if (convertVisible.value || settingsVisible.value) {
+      return;
+    }
+    e.preventDefault();
+    store.sendCurrentToHiveFolder();
+    return;
+  }
+
   if (matchKey(e, sc.slideshowSpeed)) {
     e.preventDefault();
     const n = parseInt(e.key, 10);

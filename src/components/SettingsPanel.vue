@@ -79,6 +79,7 @@ const SHORTCUT_ITEMS = [
   "toggleExif",
   "stopSlideshow",
   "slideshowSpeed",
+  "sendToHiveFolder",
 ] as const;
 
 type ShortcutId = (typeof SHORTCUT_ITEMS)[number];
@@ -96,6 +97,7 @@ const KEY_LABELS: Record<string, string> = {
   f11: "F11",
   enter: "Enter",
   tab: "Tab",
+  insert: "Insert",
   digit: "1~9",
 };
 

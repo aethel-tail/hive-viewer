@@ -114,6 +114,7 @@ export const ja: Record<keyof typeof zhCN, string> = {
   "settings.shortcuts.toggleExif": "EXIF パネルの開閉",
   "settings.shortcuts.stopSlideshow": "スライドショーを停止",
   "settings.shortcuts.slideshowSpeed": "スライドショー速度 1～9 秒",
+  "settings.shortcuts.sendToHiveFolder": "Pictures\\hive-viewer へ送る",
   "settings.shortcuts.recording": "新しいキーを押してください…（Esc でキャンセル）",
   "settings.shortcuts.conflict": "「{name}」で既に使用されています",
   "settings.shortcuts.hint":
@@ -198,6 +199,9 @@ export const ja: Record<keyof typeof zhCN, string> = {
   "delete.confirm": "「{name}」をごみ箱に移動しますか？",
   "delete.ok": "削除",
   "delete.done": "ごみ箱に移動しました",
+  "send.done": "hive-viewer フォルダーに送信しました",
+  "send.doneMany": "{n} 枚を hive-viewer フォルダーに送信しました",
+  "send.failed": "送信に失敗しました：{msg}",
   "message.atEnd": "これが最後の画像です",
   "message.atStart": "これが最初の画像です",
   "message.noImages": "このフォルダーには画像がありません",

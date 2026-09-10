@@ -80,6 +80,7 @@ export const DEFAULT_SHORTCUTS = {
   toggleExif: "tab", // 打开 / 关闭 EXIF 面板
   stopSlideshow: "ctrl+0", // 停止幻灯片播放
   slideshowSpeed: "ctrl+digit", // 幻灯片播放 1~9 秒
+  sendToHiveFolder: "insert", // 发送当前图片到 图片文件夹\hive-viewer
 };
 
 // 只读模式：独立转换窗口只读设置，不回写 settings.json，
@@ -809,6 +810,32 @@ export const useViewerStore = defineStore("viewer", () => {
     }
   }
 
+  // 发送当前页（双页 = 整组）到「图片文件夹\hive-viewer」：后端复制文件，同名自动追加 _1、_2。
+  // sendBusy 防连点：快速连按不会并发写同一目标文件。
+  let sendBusy = false;
+  async function sendCurrentToHiveFolder() {
+    if (sendBusy || files.value.length === 0) {
+      return;
+    }
+    sendBusy = true;
+    try {
+      const idxs = isDual.value ? [...groupIndices.value] : [currentIndex.value];
+      const paths = idxs.map((i) => files.value[i]?.path).filter((p): p is string => !!p);
+      if (paths.length === 0) {
+        return;
+      }
+      try {
+        const copied = await invoke<string[]>("send_to_hive_folder", { paths });
+        showToast(copied.length > 1 ? t("send.doneMany", { n: copied.length }) : t("send.done"));
+      } catch (e) {
+        console.error("Send to hive-viewer folder failed:", e);
+        showToast(t("send.failed", { msg: String(e) }));
+      }
+    } finally {
+      sendBusy = false;
+    }
+  }
+
   async function loadSettings() {
     try {
       // 一次 IPC 取全部，避免 9 次串行 store.get
@@ -1136,5 +1163,6 @@ export const useViewerStore = defineStore("viewer", () => {
     setShellContextMenu,
     resetSlideshowTimer,
     deleteCurrent,
+    sendCurrentToHiveFolder,
   };
 });
