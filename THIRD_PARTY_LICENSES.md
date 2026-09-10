@@ -2,7 +2,7 @@
 
 Hive Viewer 自身以 MIT 许可证发布（见 [`LICENSE`](LICENSE)）。本文件列出随发行版（可执行文件 / NSIS 安装包）一同分发的第三方组件及其许可证，以履行署名、许可证文本保留（BSD 类）与源码可获取性（MPL-2.0）等义务。
 
-> 对应版本：Hive Viewer 1.2.3 工作树；依赖版本以 [`src-tauri/Cargo.lock`](src-tauri/Cargo.lock) 为准。依赖升级后请同步更新本文件（可用 `cargo-about` 重新生成）。
+> 对应版本：Hive Viewer 1.3.0 工作树；依赖版本以 [`src-tauri/Cargo.lock`](src-tauri/Cargo.lock) 为准。依赖升级后请同步更新本文件（可用 `cargo-about` 重新生成）。
 
 ## 主要组件
 
