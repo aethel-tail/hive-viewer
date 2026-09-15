@@ -1,14 +1,19 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted, onUnmounted } from "vue";
 import { useViewerStore } from "@/stores/viewer";
+import { hqDownscale } from "@/hqDownscale";
 import { t } from "@/i18n";
 
 const ZOOM_STEP = 25; // 固定档位步长（%）
 const ZOOM_MIN = 25;
 const ZOOM_MAX = 3200;
 const WHEEL_COOLDOWN_MS = 300;
+const HQ_DEBOUNCE_MS = 150; // 高画质位图重生成防抖（缩放/窗口停稳后执行）
 
 type Size = { w: number; h: number };
+
+// 高画质降采样位图：显示 canvas 的 backing 尺寸（设备像素）
+type HqBitmap = { w: number; h: number };
 
 // 双层交叉缓冲：front 在显示，back 在加载；back 全部 img load 完成后才翻转，
 // 翻转前旧图始终完整可见 → 任何加载耗时不黑屏。翻转后清空 back（释放解码内存）。
@@ -21,10 +26,21 @@ interface Layer {
   got: number;
   panX: number; // 屏幕坐标平移（拖动查看放大后的图片）
   panY: number;
+  hq: [HqBitmap | null, HqBitmap | null]; // 高画质位图（就绪后顶替 <img> 显示）
 }
 
 function emptyLayer(): Layer {
-  return { uri: "", uri2: "", group: [], size: null, need: 0, got: 0, panX: 0, panY: 0 };
+  return {
+    uri: "",
+    uri2: "",
+    group: [],
+    size: null,
+    need: 0,
+    got: 0,
+    panX: 0,
+    panY: 0,
+    hq: [null, null],
+  };
 }
 
 const store = useViewerStore();
@@ -47,7 +63,9 @@ watch(
     if (!uri) {
       return;
     }
-    const L = layers[1 - activeIdx.value];
+    const idx = 1 - activeIdx.value;
+    releaseHq(idx);
+    const L = layers[idx];
     L.uri = uri;
     L.uri2 = uri2;
     L.group = [...group];
@@ -68,8 +86,9 @@ watch(
   () => store.dataUri,
   (uri) => {
     if (!uri) {
-      for (const L of layers) {
-        Object.assign(L, emptyLayer());
+      for (let i = 0; i < layers.length; i++) {
+        releaseHq(i);
+        Object.assign(layers[i], emptyLayer());
       }
       activeIdx.value = 0;
     }
@@ -83,12 +102,20 @@ function onLayerImgDone(idx: number, which: 0 | 1, e: Event) {
   if (!expect || img.src !== expect) {
     return;
   } // 过期事件（快速翻页时被替换的 src）
-  if (e.type === "load" && which === 0) {
-    L.size = { w: img.naturalWidth, h: img.naturalHeight };
+  if (e.type === "load") {
+    hqSources[idx][which] = img;
+    if (which === 0) {
+      L.size = { w: img.naturalWidth, h: img.naturalHeight };
+    }
+  } else {
+    hqSources[idx][which] = null;
   }
   L.got++;
-  if (L.got >= L.need && idx !== activeIdx.value) {
-    flipTo(idx);
+  if (L.got >= L.need) {
+    scheduleHq(idx, true); // 高画质位图后台生成、就绪后热替换（不阻塞翻页）
+    if (idx !== activeIdx.value) {
+      flipTo(idx);
+    }
   }
 }
 
@@ -103,13 +130,159 @@ function flipTo(idx: number) {
 }
 
 function clearBack() {
-  const L = layers[1 - activeIdx.value];
-  Object.assign(L, emptyLayer());
+  const idx = 1 - activeIdx.value;
+  releaseHq(idx);
+  Object.assign(layers[idx], emptyLayer());
 }
 
 function onEffectEnd() {
   effectLayer.value = -1;
   clearBack();
+}
+
+// ---- 高画质降采样位图（适配窗口/缩小场景）----
+// <img> 始终是解码源，也是任何失败时的回退显示；图片被明显缩小时，
+// 后台按“显示分辨率”生成一张位图（分步预滤波 + Lanczos3 收尾，见 @/hqDownscale），
+// 就绪后用它顶替 <img>。生成不阻塞翻页（先翻转、后热替换）。
+
+const hqCanvasEls = new Map<string, HTMLCanvasElement>();
+const hqSources: (HTMLImageElement | null)[][] = [
+  [null, null],
+  [null, null],
+];
+const hqTimers: (number | null)[] = [null, null];
+const hqTokens = [0, 0];
+
+function hqRef(i: number, which: 0 | 1, el: unknown) {
+  const key = `${i}:${which}`;
+  if (el instanceof HTMLCanvasElement) {
+    hqCanvasEls.set(key, el);
+  } else {
+    hqCanvasEls.delete(key);
+  }
+}
+
+// 各页的目标 backing 尺寸（显示设备像素 = 显示尺寸 × devicePixelRatio）
+function hqTargets(L: Layer): { which: 0 | 1; w: number; h: number }[] {
+  if (!L.size || !containerSize.value) {
+    return [];
+  }
+  const dpr = window.devicePixelRatio || 1;
+  if (L.uri2) {
+    const d = dualLayoutFor(L);
+    if (!d) {
+      return [];
+    }
+    return [
+      { which: 0, w: Math.round(d.w0 * dpr), h: Math.round(d.H * dpr) },
+      { which: 1, w: Math.round(d.w1 * dpr), h: Math.round(d.H * dpr) },
+    ];
+  }
+  const s = layerSingleScale(L);
+  return [{ which: 0, w: Math.round(L.size.w * s * dpr), h: Math.round(L.size.h * s * dpr) }];
+}
+
+function scheduleHq(i: number, immediate = false) {
+  const L = layers[i];
+  if (!L.uri || !L.size) {
+    return;
+  }
+  const timer = hqTimers[i];
+  if (timer !== null) {
+    clearTimeout(timer);
+  }
+  hqTimers[i] = window.setTimeout(
+    () => {
+      hqTimers[i] = null;
+      void runHq(i);
+    },
+    immediate ? 0 : HQ_DEBOUNCE_MS,
+  );
+}
+
+async function runHq(i: number) {
+  const L = layers[i];
+  if (!L.uri || !L.size || !containerSize.value) {
+    return;
+  }
+  const uri = L.uri;
+  const token = ++hqTokens[i];
+  for (const t of hqTargets(L)) {
+    const img = hqSources[i][t.which];
+    if (!img) {
+      continue;
+    }
+    // ponytail: 只按扩展名跳过 GIF；动画 WebP 无法廉价探测，命中该路径会停在首帧
+    const src = store.files[L.group[t.which]]?.path ?? "";
+    if (src.toLowerCase().endsWith(".gif")) {
+      continue; // 动图交给 <img> 播放，静态位图会定格
+    }
+    let result: HTMLCanvasElement | null = null;
+    try {
+      result = await hqDownscale(img, t.w, t.h);
+    } catch {
+      result = null;
+    }
+    if (token !== hqTokens[i] || L.uri !== uri) {
+      return; // 已过期（换图或重新调度）
+    }
+    if (!result) {
+      // 不适用（放大/几乎不缩/超预算）或失败：退回 <img>
+      releaseHqPage(i, t.which);
+      continue;
+    }
+    const el = hqCanvasEls.get(`${i}:${t.which}`);
+    const ctx = el?.getContext("2d");
+    if (!el || !ctx) {
+      continue;
+    }
+    el.width = result.width;
+    el.height = result.height;
+    ctx.drawImage(result, 0, 0);
+    result.width = 1; // 已拷入显示 canvas：立即释放临时位图
+    result.height = 1;
+    L.hq[t.which] = { w: el.width, h: el.height };
+  }
+}
+
+// 释放单页位图（缩回 backing 内存释放）
+function releaseHqPage(i: number, which: 0 | 1) {
+  layers[i].hq[which] = null;
+  const el = hqCanvasEls.get(`${i}:${which}`);
+  if (el) {
+    el.width = 1;
+    el.height = 1;
+  }
+}
+
+// 释放整层（换图 / 清空时调用）
+function releaseHq(i: number) {
+  hqTokens[i]++;
+  hqSources[i][0] = null;
+  hqSources[i][1] = null;
+  releaseHqPage(i, 0);
+  releaseHqPage(i, 1);
+}
+
+// 缩放模式/倍率/窗口尺寸变化 → 停稳后按新尺度重生成（旧位图继续显示到替换完成）
+watch(
+  () => [containerSize.value, store.zoomMode, store.customZoom] as const,
+  () => {
+    scheduleHq(0);
+    scheduleHq(1);
+  },
+);
+
+// 单页 canvas 的 CSS 尺寸/变换，与 <img> 完全一致（backing 是“显示设备像素”）
+function hqSingleStyle(L: Layer) {
+  if (!L.size) {
+    return {};
+  }
+  return {
+    width: `${L.size.w}px`,
+    height: `${L.size.h}px`,
+    transform: `scale(${layerSingleScale(L)})`,
+  };
 }
 
 const effectClasses = computed(() => ({
@@ -348,6 +521,11 @@ onMounted(() => {
 onUnmounted(() => {
   resizeObs?.disconnect();
   window.removeEventListener("blur", stopPan);
+  for (const t of hqTimers) {
+    if (t !== null) {
+      clearTimeout(t);
+    }
+  }
 });
 
 function zoomIn() {
@@ -460,28 +638,53 @@ defineExpose({
       <template v-if="L.uri2">
         <img
           class="page page-a"
+          crossorigin="anonymous"
+          :class="{ 'hq-source': L.hq[0] }"
           :src="L.uri"
           :style="dualStyleFor(L, 0)"
           @load="onLayerImgDone(i, 0, $event)"
           @error="onLayerImgDone(i, 0, $event)"
         />
+        <canvas
+          v-show="L.hq[0]"
+          :ref="(el) => hqRef(i, 0, el)"
+          class="page hq-cv"
+          :style="dualStyleFor(L, 0)"
+        />
         <img
           class="page page-b"
+          crossorigin="anonymous"
+          :class="{ 'hq-source': L.hq[1] }"
           :src="L.uri2"
           :style="dualStyleFor(L, 1)"
           @load="onLayerImgDone(i, 1, $event)"
           @error="onLayerImgDone(i, 1, $event)"
         />
+        <canvas
+          v-show="L.hq[1]"
+          :ref="(el) => hqRef(i, 1, el)"
+          class="page hq-cv"
+          :style="dualStyleFor(L, 1)"
+        />
       </template>
       <!-- 单页：含 fit/width/custom，以及双页下的封面/横图独占/尾页 -->
-      <img
-        v-else
-        :src="L.uri"
-        :style="{ transform: `scale(${layerSingleScale(L)})` }"
-        :class="{ 'no-anim': i !== activeIdx }"
-        @load="onLayerImgDone(i, 0, $event)"
-        @error="onLayerImgDone(i, 0, $event)"
-      />
+      <template v-else>
+        <img
+          crossorigin="anonymous"
+          :class="{ 'no-anim': i !== activeIdx, 'hq-source': L.hq[0] }"
+          :src="L.uri"
+          :style="{ transform: `scale(${layerSingleScale(L)})` }"
+          @load="onLayerImgDone(i, 0, $event)"
+          @error="onLayerImgDone(i, 0, $event)"
+        />
+        <canvas
+          v-show="L.hq[0]"
+          :ref="(el) => hqRef(i, 0, el)"
+          class="hq-cv"
+          :class="{ 'no-anim': i !== activeIdx }"
+          :style="hqSingleStyle(L)"
+        />
+      </template>
     </div>
     <div v-if="!store.dataUri" class="placeholder">
       <div class="placeholder-actions">
@@ -543,7 +746,8 @@ defineExpose({
   transition: none;
 }
 
-.viewer-layer img {
+.viewer-layer img,
+.viewer-layer canvas {
   max-width: none;
   max-height: none;
   user-select: none;
@@ -552,13 +756,22 @@ defineExpose({
   -webkit-user-drag: none;
 }
 
+/* 高画质位图就绪后 <img> 退出布局（继续作为解码源保留） */
+
+.hq-source {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+}
+
 /* will-change 只留在 .stage（它已是常驻合成层，且保证 back 层翻转前已光栅化）；
    img 再单独提升一层是冗余的，缩放过渡开始时浏览器会自动提升 */
 
 /* back 层：新图先以 scale(1) 渲染，load 后才知道适配比例，
    若保留过渡会看到“缩放动画”→ 未显示的层禁用过渡，翻转时已是最终比例 */
 
-.viewer-layer img.no-anim {
+.viewer-layer img.no-anim,
+.viewer-layer canvas.no-anim {
   transition: none;
 }
 
